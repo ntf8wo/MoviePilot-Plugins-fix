@@ -30,7 +30,7 @@ from app.utils.http import RequestUtils
 from app.utils.string import StringUtils
 
 
-class PersonMetaMod(_PluginBase):
+class personmetamod(_PluginBase):
     # 插件名称 (已修改，方便区分)
     plugin_name = "演职人员刮削(豆瓣优先版)"
     # 插件描述
@@ -123,8 +123,8 @@ class PersonMetaMod(_PluginBase):
         """
         if self._enabled and self._cron:
             return [{
-                # 关键修改：服务ID改为 PersonMetaMod，避免冲突
-                "id": "PersonMetaMod",
+                # 关键修改：服务ID改为 personmetamod，避免冲突
+                "id": "personmetamod",
                 "name": "演职人员刮削服务(修正版)",
                 "trigger": CronTrigger.from_crontab(self._cron),
                 "func": self.scrap_library,
