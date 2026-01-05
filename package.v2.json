@@ -1,0 +1,10 @@
+{
+  "PersonMetaMod": {
+    "name": "演职人员刮削(mod)",
+    "description": "刮削演职人员图片以及中文名称（优先匹配豆瓣数据）。",
+    "author": "jxxghp (Mod by ntf8wo)",
+    "version": "2.2.2_mod",
+    "level": 1,
+    "labels": "刮削,演职人员"
+  }
+}
