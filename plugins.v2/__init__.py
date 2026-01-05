@@ -63,7 +63,7 @@ class PersonMetaMod(_PluginBase):
     _remove_nozh = False
     _mediaservers = []
 
-    def init_plugin(self, config: dict = None):
+    def init_plugin(self, config: dict = 无):
         if config:
             self._enabled = config.get("enabled")
             self._onlyonce = config.get("onlyonce")
