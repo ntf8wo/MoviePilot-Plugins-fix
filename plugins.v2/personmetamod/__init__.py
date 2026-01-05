@@ -38,7 +38,7 @@ class personmetamod(_PluginBase):
     # 插件图标
     plugin_icon = "actor.png"
     # 插件版本
-    plugin_version = "2.3.0_mod_v6"
+    plugin_version = "2.3.1_mod_v7"
     # 插件作者
     plugin_author = "jxxghp"
     # 作者主页
@@ -139,165 +139,160 @@ class personmetamod(_PluginBase):
         """
         return [
             {
-                'component': 'VForm',
+                'component': 'VRow',
                 'content': [
                     {
-                        'component': 'VRow',
+                        'component': 'VCol',
+                        'props': {
+                            'cols': 12,
+                            'md': 6
+                        },
                         'content': [
                             {
-                                'component': 'VCol',
+                                'component': 'VSwitch',
                                 'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'enabled',
-                                            'label': '启用插件',
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'onlyonce',
-                                            'label': '立即运行一次',
-                                        }
-                                    }
-                                ]
+                                    'model': 'enabled',
+                                    'label': '启用插件',
+                                }
                             }
                         ]
                     },
                     {
-                        'component': 'VRow',
+                        'component': 'VCol',
+                        'props': {
+                            'cols': 12,
+                            'md': 6
+                        },
                         'content': [
                             {
-                                'component': 'VCol',
+                                'component': 'VSwitch',
                                 'props': {
-                                    'cols': 12,
-                                    'md': 4
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VCronField',
-                                        'props': {
-                                            'model': 'cron',
-                                            'label': '媒体库扫描周期',
-                                            'placeholder': '5位cron表达式'
-                                        }
-                                    }
-                                ]
-                            },
+                                    'model': 'onlyonce',
+                                    'label': '立即运行一次',
+                                }
+                            }
+                        ]
+                    }
+                ]
+            },
+            {
+                'component': 'VRow',
+                'content': [
+                    {
+                        'component': 'VCol',
+                        'props': {
+                            'cols': 12,
+                            'md': 4
+                        },
+                        'content': [
                             {
-                                'component': 'VCol',
+                                'component': 'VCronField',
                                 'props': {
-                                    'cols': 12,
-                                    'md': 4
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'delay',
-                                            'label': '入库延迟时间（秒）',
-                                            'placeholder': '30'
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 4
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSelect',
-                                        'props': {
-                                            'model': 'type',
-                                            'label': '刮削条件',
-                                            'items': [
-                                                {'title': '全部', 'value': 'all'},
-                                                {'title': '演员非中文', 'value': 'name'},
-                                                {'title': '角色非中文', 'value': 'role'},
-                                            ]
-                                        }
-                                    }
-                                ]
+                                    'model': 'cron',
+                                    'label': '媒体库扫描周期',
+                                    'placeholder': '5位cron表达式'
+                                }
                             }
                         ]
                     },
                     {
-                        'component': 'VRow',
+                        'component': 'VCol',
+                        'props': {
+                            'cols': 12,
+                            'md': 4
+                        },
                         'content': [
                             {
-                                'component': 'VCol',
+                                'component': 'VTextField',
                                 'props': {
-                                    'cols': 12
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSelect',
-                                        'props': {
-                                            'multiple': True,
-                                            'chips': True,
-                                            'clearable': True,
-                                            'model': 'mediaservers',
-                                            'label': '媒体服务器',
-                                            'items': [{"title": config.name, "value": config.name}
-                                                      for config in MediaServerHelper().get_configs().values()]
-                                        }
-                                    }
-                                ]
+                                    'model': 'delay',
+                                    'label': '入库延迟时间（秒）',
+                                    'placeholder': '30'
+                                }
                             }
                         ]
                     },
                     {
-                        'component': 'VRow',
+                        'component': 'VCol',
+                        'props': {
+                            'cols': 12,
+                            'md': 4
+                        },
                         'content': [
                             {
-                                'component': 'VCol',
+                                'component': 'VSelect',
                                 'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'remove_nozh',
-                                            'label': '删除非中文演员',
-                                        }
-                                    }
-                                ]
-                            },
+                                    'model': 'type',
+                                    'label': '刮削条件',
+                                    'items': [
+                                        {'title': '全部', 'value': 'all'},
+                                        {'title': '演员非中文', 'value': 'name'},
+                                        {'title': '角色非中文', 'value': 'role'},
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                ]
+            },
+            {
+                'component': 'VRow',
+                'content': [
+                    {
+                        'component': 'VCol',
+                        'props': {
+                            'cols': 12
+                        },
+                        'content': [
                             {
-                                'component': 'VCol',
+                                'component': 'VSelect',
                                 'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'lock_info',
-                                            'label': '锁定元数据 (Name/Overview)',
-                                            'hint': '修改后锁定姓名和简介，防止被NFO覆盖',
-                                        }
-                                    }
-                                ]
+                                    'multiple': True,
+                                    'chips': True,
+                                    'clearable': True,
+                                    'model': 'mediaservers',
+                                    'label': '媒体服务器',
+                                    'items': [{"title": config.name, "value": config.name}
+                                              for config in MediaServerHelper().get_configs().values()]
+                                }
+                            }
+                        ]
+                    }
+                ]
+            },
+            {
+                'component': 'VRow',
+                'content': [
+                    {
+                        'component': 'VCol',
+                        'props': {
+                            'cols': 12,
+                            'md': 6
+                        },
+                        'content': [
+                            {
+                                'component': 'VSwitch',
+                                'props': {
+                                    'model': 'remove_nozh',
+                                    'label': '删除非中文演员',
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VCol',
+                        'props': {
+                            'cols': 12,
+                            'md': 6
+                        },
+                        'content': [
+                            {
+                                'component': 'VSwitch',
+                                'props': {
+                                    'model': 'lock_info',
+                                    'label': '锁定元数据 (Name/Overview)',
+                                    'hint': '修改后锁定姓名和简介，防止被NFO覆盖',
+                                }
                             }
                         ]
                     }
@@ -310,7 +305,8 @@ class personmetamod(_PluginBase):
             "type": "all",
             "delay": 30,
             "remove_nozh": False,
-            "lock_info": False
+            "lock_info": False,
+            "mediaservers": []
         }
 
     def get_page(self) -> List[dict]:
