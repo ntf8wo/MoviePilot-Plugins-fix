@@ -38,7 +38,7 @@ class personmetamod(_PluginBase):
     # 插件图标
     plugin_icon = "actor.png"
     # 插件版本
-    plugin_version = "2.3.1_mod_v7"
+    plugin_version = "2.3.3_mod_v9_optional_lock"
     # 插件作者
     plugin_author = "jxxghp"
     # 作者主页
@@ -61,7 +61,7 @@ class personmetamod(_PluginBase):
     _delay = 0
     _type = "all"
     _remove_nozh = False
-    _lock_info = False  # 控制是否锁定
+    _lock_info = False  # 默认关闭锁定
     _mediaservers = []
 
     def init_plugin(self, config: dict = None):
@@ -72,6 +72,7 @@ class personmetamod(_PluginBase):
             self._type = config.get("type") or "all"
             self._delay = config.get("delay") or 0
             self._remove_nozh = config.get("remove_nozh") or False
+            # 获取锁定配置，默认为 False (不锁定)
             self._lock_info = config.get("lock_info") or False
             self._mediaservers = config.get("mediaservers") or []
 
@@ -279,6 +280,7 @@ class personmetamod(_PluginBase):
                             }
                         ]
                     },
+                    # 这里的开关默认值为 False，如果不开启，绝不会执行锁定逻辑
                     {
                         'component': 'VCol',
                         'props': {
@@ -290,8 +292,8 @@ class personmetamod(_PluginBase):
                                 'component': 'VSwitch',
                                 'props': {
                                     'model': 'lock_info',
-                                    'label': '锁定元数据 (Name/Overview)',
-                                    'hint': '修改后锁定姓名和简介，防止被NFO覆盖',
+                                    'label': '锁定元数据 (可选)',
+                                    'hint': '开启后，修改过的信息将被锁定(Name/Overview)，防止被NFO覆盖。建议保持关闭。',
                                 }
                             }
                         ]
@@ -305,7 +307,7 @@ class personmetamod(_PluginBase):
             "type": "all",
             "delay": 30,
             "remove_nozh": False,
-            "lock_info": False,
+            "lock_info": False,  # 默认关闭
             "mediaservers": []
         }
 
@@ -520,7 +522,9 @@ class personmetamod(_PluginBase):
         """
         更新人物信息
         """
-        
+        original_name = people.get("Name")
+        logger.debug(f"正在处理人物: {original_name} (ID: {people.get('Id')}) ...")
+
         # 辅助函数：获取 TMDB ID
         def __get_peopleid(p: dict) -> Tuple[Optional[str], Optional[str]]:
             if not p.get("ProviderIds"):
@@ -544,6 +548,7 @@ class personmetamod(_PluginBase):
             personinfo = self.get_iteminfo(server=server, server_type=server_type,
                                            itemid=people.get("Id"))
             if not personinfo:
+                logger.debug(f"未在 Emby 中找到人物详情: {original_name}")
                 return None
 
             # 标记是否需要更新全局信息
@@ -564,6 +569,7 @@ class personmetamod(_PluginBase):
             person_tmdbid, _ = __get_peopleid(personinfo)
             if person_tmdbid:
                 try:
+                    logger.debug(f"正在获取 TMDB 人物详情: {person_tmdbid} ...")
                     person_detail = TmdbChain().person_detail(int(person_tmdbid))
                     if person_detail:
                         # 图片
@@ -577,7 +583,6 @@ class personmetamod(_PluginBase):
                                 tmdb_name_cn = person_detail.name
                             else:
                                 tmdb_name_en = person_detail.name
-                                # 尝试检查 also_known_as 找中文名 (可选优化，此处暂只用主name)
 
                         # 简介
                         if person_detail.biography:
@@ -585,6 +590,8 @@ class personmetamod(_PluginBase):
                                 tmdb_overview_cn = person_detail.biography
                             else:
                                 tmdb_overview_en = person_detail.biography
+                        
+                        logger.debug(f"TMDB获取结果: 中文名={tmdb_name_cn}, 英文名={tmdb_name_en}, 简介长度={len(person_detail.biography) if person_detail.biography else 0}")
                 except Exception as e:
                     logger.warn(f"TMDB获取人物详情失败: {e}")
 
@@ -603,6 +610,7 @@ class personmetamod(_PluginBase):
                     
                     if is_match:
                         douban_match = douban_actor
+                        logger.info(f"豆瓣匹配成功: {current_name} => {douban_match.get('name')}")
                         break
 
             # --- 决策逻辑 ---
@@ -614,26 +622,35 @@ class personmetamod(_PluginBase):
             
             if is_douban_zh:
                 final_name = douban_name
+                logger.debug(f"姓名策略: 使用豆瓣中文名 [{final_name}]")
             elif tmdb_name_cn:
                 final_name = tmdb_name_cn
+                logger.debug(f"姓名策略: 使用 TMDB 中文名 [{final_name}]")
             elif tmdb_name_en:
                 final_name = tmdb_name_en
+                logger.debug(f"姓名策略: 使用 TMDB 英文名 [{final_name}]")
             
             # 繁转简
             if final_name:
-                final_name = __to_zh_cn(final_name)
+                final_name_sc = __to_zh_cn(final_name)
+                if final_name_sc != final_name:
+                    logger.debug(f"姓名繁转简: {final_name} -> {final_name_sc}")
+                    final_name = final_name_sc
 
             # 2. 【简介 (Overview)】
             # 优先级：TMDB中文 > TMDB英文 > 豆瓣
             if tmdb_overview_cn:
                 final_overview = tmdb_overview_cn
+                logger.debug(f"简介策略: 使用 TMDB 中文简介")
             elif tmdb_overview_en:
                 final_overview = tmdb_overview_en
+                logger.debug(f"简介策略: 使用 TMDB 英文简介")
             elif douban_match:
-                # 尝试获取豆瓣简介 (注意：通常 douban_info 的 actors 列表简介可能不全)
+                # 尝试获取豆瓣简介
                 raw_intro = douban_match.get("summary") or douban_match.get("intro") or douban_match.get("biography")
                 if raw_intro:
                      final_overview = raw_intro
+                     logger.debug(f"简介策略: 使用 豆瓣 简介")
 
             # 繁转简
             if final_overview:
@@ -641,16 +658,20 @@ class personmetamod(_PluginBase):
 
             # 3. 【图片 (Image)】
             # 优先级：豆瓣 > TMDB
+            img_source = "None"
             if douban_match:
                 avatar = douban_match.get("avatar")
                 if isinstance(avatar, dict) and avatar.get("large"):
                     final_img = avatar.get("large")
+                    img_source = "Douban"
                 elif isinstance(avatar, str):
                     final_img = avatar
+                    img_source = "Douban"
             
             # 豆瓣没图，用 TMDB
             if not final_img and tmdb_img:
                 final_img = tmdb_img
+                img_source = "TMDB"
 
             # 4. 【角色 (Role)】
             final_role = None
@@ -659,15 +680,18 @@ class personmetamod(_PluginBase):
                 character = re.sub(r"饰\s*|演员\s*", "", douban_match.get("character")).strip()
                 if character:
                     final_role = __to_zh_cn(character)
+                    logger.debug(f"角色信息: 从豆瓣获取 [{final_role}]")
 
             # --- 执行更新判断 ---
 
             # A. 全局信息更新 (Name, Overview)
             if final_name and final_name != personinfo.get("Name"):
+                logger.info(f"更新人物姓名: {personinfo.get('Name')} -> {final_name}")
                 personinfo["Name"] = final_name
                 updated_global = True
             
             if final_overview and final_overview != personinfo.get("Overview"):
+                logger.info(f"更新人物简介: {final_name} ...")
                 personinfo["Overview"] = final_overview
                 updated_global = True
 
@@ -678,10 +702,12 @@ class personmetamod(_PluginBase):
             
             # C. 图片更新
             if final_img:
-                self.set_item_image(server=server, server_type=server_type, 
-                                    itemid=people.get("Id"), imageurl=final_img)
+                logger.info(f"正在更新图片 ({img_source}): {final_name}")
+                if not self.set_item_image(server=server, server_type=server_type, 
+                                    itemid=people.get("Id"), imageurl=final_img):
+                    logger.warn(f"图片下载/更新失败: {final_img}")
 
-            # D. 锁定逻辑 (仅当开启且发生了全局更新时)
+            # D. 锁定逻辑 (仅当配置开关开启时才执行)
             if self._lock_info and updated_global:
                 if "LockedFields" not in personinfo: 
                     personinfo["LockedFields"] = []
@@ -693,20 +719,23 @@ class personmetamod(_PluginBase):
                 for f in fields_to_lock:
                     if f not in personinfo["LockedFields"]:
                         personinfo["LockedFields"].append(f)
+                        logger.info(f"锁定字段: {f}")
             
             # --- 提交全局修改 ---
             if updated_global:
+                logger.info(f"提交更新人物全局信息: {final_name}")
                 self.set_iteminfo(server=server, server_type=server_type,
                                   itemid=people.get("Id"), iteminfo=personinfo)
                 return ret_people
             
             # 仅角色或名字变动返回
             if final_role or (final_name and final_name != people.get("Name")):
+                logger.info(f"仅更新影片内角色/姓名: {final_name} - {final_role}")
                 if final_name: ret_people["Name"] = final_name
                 return ret_people
 
         except Exception as err:
-            logger.error(f"更新人物信息失败：{str(err)}")
+            logger.error(f"更新人物信息发生错误：{str(err)}")
         
         return None
 
@@ -720,6 +749,7 @@ class personmetamod(_PluginBase):
                                                  season=season)
         if doubaninfo:
             doubanitem = self.chain.douban_info(doubaninfo.get("id")) or {}
+            logger.info(f"获取豆瓣条目成功: {mediainfo.title_year} (ID: {doubaninfo.get('id')})")
             return (doubanitem.get("actors") or []) + (doubanitem.get("directors") or [])
         else:
             logger.debug(f"未找到豆瓣信息：{mediainfo.title_year}")
@@ -802,7 +832,7 @@ class personmetamod(_PluginBase):
                 r = RequestUtils(proxies=settings.PROXY, ua=settings.USER_AGENT, headers=headers).get_res(url=imageurl, raise_exception=True)
                 if r: return base64.b64encode(r.content).decode()
             except Exception as err:
-                logger.error(f"下载图片失败：{str(err)}")
+                logger.warn(f"下载图片失败 ({imageurl}): {str(err)}")
             return None
 
         def __set_emby_item_image(_base64: str):
@@ -814,13 +844,13 @@ class personmetamod(_PluginBase):
                 res = service.instance.post_data(url=url, data=_base64, headers={"Content-Type": "image/png"})
                 if res and res.status_code in [200, 204]: return True
             except Exception as result:
-                logger.error(f"更新媒体项图片失败：{result}")
+                logger.error(f"推送图片到媒体服务器失败：{result}")
             return False
 
         image_base64 = __download_image()
         if image_base64: 
             return __set_emby_item_image(image_base64)
-        return None
+        return False
 
     def stop_service(self):
         try:
