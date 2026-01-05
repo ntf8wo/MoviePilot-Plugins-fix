@@ -31,19 +31,19 @@ from app.utils.string import StringUtils
 
 
 class personmetamod(_PluginBase):
-    # 插件名称 (已修改，方便区分)
-    plugin_name = "演职人员刮削(豆瓣优先版)"
+    # 插件名称
+    plugin_name = "演职人员刮削(最终纯净版)"
     # 插件描述
-    plugin_desc = "刮削演职人员图片以及中文名称（优先匹配豆瓣数据）。"
+    plugin_desc = "刮削演职人员图片及中文名（豆瓣优先，TMDB仅匹配本名，禁用别名）。"
     # 插件图标
     plugin_icon = "actor.png"
     # 插件版本
-    plugin_version = "2.2.2_mod"
+    plugin_version = "2.2.2_mod_v3"
     # 插件作者
     plugin_author = "jxxghp"
     # 作者主页
     author_url = "https://github.com/jxxghp"
-    # 插件配置项ID前缀 (关键修改：防止与原版配置冲突)
+    # 插件配置项ID前缀
     plugin_config_prefix = "personmeta_mod_"
     # 加载顺序
     plugin_order = 24
@@ -83,7 +83,7 @@ class personmetamod(_PluginBase):
                                     run_date=datetime.datetime.now(
                                         tz=pytz.timezone(settings.TZ)) + datetime.timedelta(seconds=3)
                                     )
-            logger.info(f"演职人员刮削(修正版)服务启动，立即运行一次")
+            logger.info(f"演职人员刮削(最终纯净版)服务启动，立即运行一次")
             # 关闭一次性开关
             self._onlyonce = False
             # 保存配置
@@ -123,9 +123,8 @@ class personmetamod(_PluginBase):
         """
         if self._enabled and self._cron:
             return [{
-                # 关键修改：服务ID改为 personmetamod，避免冲突
                 "id": "personmetamod",
-                "name": "演职人员刮削服务(修正版)",
+                "name": "演职人员刮削服务(最终纯净版)",
                 "trigger": CronTrigger.from_crontab(self._cron),
                 "func": self.scrap_library,
                 "kwargs": {}
@@ -518,7 +517,7 @@ class personmetamod(_PluginBase):
                         people: dict, douban_actors: list = None) -> Optional[dict]:
         """
         更新人物信息，返回替换后的人物信息
-        (修改：优先使用豆瓣信息，TMDB作为兜底)
+        (修改：豆瓣优先，TMDB不匹配别名)
         """
 
         def __get_peopleid(p: dict) -> Tuple[Optional[str], Optional[str]]:
@@ -570,7 +569,7 @@ class personmetamod(_PluginBase):
                         logger.debug(f"{people.get('Name')} 从TMDB获取到图片：{_path}")
                         profile_path = f"https://{settings.TMDB_IMAGE_DOMAIN}/t/p/original{_path}"
                     
-                    # 暂存 TMDB 的中文名 (作为兜底)
+                    # 暂存 TMDB 的中文名 (仅当TMDB本名就是中文时)
                     tmdb_cn_name = self.__get_chinese_name(person_detail)
                     
                     # 暂存 TMDB 的中文描述
@@ -581,7 +580,7 @@ class personmetamod(_PluginBase):
             # 2. 从豆瓣信息中更新人物信息 (优先级提高)
             if douban_actors:
                 for douban_actor in douban_actors:
-                    # 匹配逻辑增强：匹配原始名字 或 TMDB获取到的中文别名
+                    # 匹配逻辑增强：匹配原始名字 或 TMDB获取到的中文本名
                     is_match = False
                     if douban_actor.get("latin_name") == people.get("Name") or \
                        douban_actor.get("name") == people.get("Name"):
@@ -628,9 +627,10 @@ class personmetamod(_PluginBase):
                         # 找到匹配项后跳出
                         break
             
-            # 3. 兜底逻辑：如果豆瓣没有更新名字，但TMDB有中文名，则使用TMDB的数据
+            # 3. 兜底逻辑：如果豆瓣没有更新名字，但TMDB有中文本名，则使用TMDB的数据
+            # 注意：这里的 tmdb_cn_name 已经是过滤过的，只包含中文本名，不包含别名
             if not updated_name and tmdb_cn_name:
-                logger.debug(f"{people.get('Name')} 豆瓣未匹配到名称，使用TMDB中文别名：{tmdb_cn_name}")
+                logger.debug(f"{people.get('Name')} 豆瓣未匹配到名称，使用TMDB中文本名：{tmdb_cn_name}")
                 personinfo["Name"] = tmdb_cn_name
                 ret_people["Name"] = tmdb_cn_name
                 updated_name = True
@@ -1067,14 +1067,12 @@ class personmetamod(_PluginBase):
     def __get_chinese_name(personinfo: schemas.MediaPerson) -> str:
         """
         获取TMDB别名中的中文名
+        (修改：只检查本名，彻底移除别名检查，防止获取到生僻真名)
         """
         try:
-            also_known_as = personinfo.also_known_as or []
-            if also_known_as:
-                for name in also_known_as:
-                    if name and StringUtils.is_chinese(name):
-                        # 使用cn2an将繁体转化为简体
-                        return zhconv.convert(name, "zh-hans")
+            # 逻辑变更：只检查 name (本名) 字段，彻底禁用 also_known_as
+            if personinfo.name and StringUtils.is_chinese(personinfo.name):
+                return personinfo.name
         except Exception as err:
             logger.error(f"获取人物中文名失败：{err}")
         return ""
