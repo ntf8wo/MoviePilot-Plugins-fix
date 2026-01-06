@@ -30,10 +30,10 @@ from app.utils.string import StringUtils
 
 class personmetamod(_PluginBase):
     # 插件名称
-    plugin_name = "演职人员刮削(v4.2稳健版)"
-    plugin_desc = "降低并发，增加写入缓冲，防止数据库锁死。"
+    plugin_name = "演职人员刮削(v4.3_Debug版)"
+    plugin_desc = "增加图片下载失败的详细日志，排查网络问题。"
     plugin_icon = "actor.png"
-    plugin_version = "4.2.0_stable"
+    plugin_version = "4.3.0_debug"
     plugin_author = "jxxghp_mod_by_gemini"
     author_url = "https://github.com/jxxghp"
     plugin_config_prefix = "personmeta_mod_"
@@ -41,7 +41,7 @@ class personmetamod(_PluginBase):
     auth_level = 1
 
     _event = threading.Event()
-    _write_lock = threading.Lock()  # 【新增】写入锁
+    _write_lock = threading.Lock()
     _scheduler = None
     _enabled = False
     _onlyonce = False
@@ -72,7 +72,7 @@ class personmetamod(_PluginBase):
         self._tmdb_credits_cache = {}
         
         if not self._executor:
-            # 【修改】将并发数降低为 2，保护数据库
+            # 保持低并发
             self._executor = ThreadPoolExecutor(max_workers=2)
 
         if self._onlyonce:
@@ -114,7 +114,7 @@ class personmetamod(_PluginBase):
         if self._enabled and self._cron:
             return [{
                 "id": "personmetamod",
-                "name": "演职人员刮削服务(稳健版)",
+                "name": "演职人员刮削服务(Debug版)",
                 "trigger": CronTrigger.from_crontab(self._cron),
                 "func": self.scrap_library,
                 "kwargs": {}
@@ -278,7 +278,6 @@ class personmetamod(_PluginBase):
                          itemid: str, iteminfo: dict, tmdb_credits: dict, douban_actors: list):
         people_list = iteminfo.get("People", []) or []
         if not people_list:
-            logger.info(f"    - 跳过: 该条目没有演职人员信息")
             return
 
         logger.info(f"    - 开始并发处理 {len(people_list)} 位演职人员...")
@@ -477,7 +476,6 @@ class personmetamod(_PluginBase):
         
         personinfo = self.get_iteminfo(server=server, server_type=server_type, itemid=people.get("Id"))
         if not personinfo: 
-            logger.debug(f"      x [失败] 无法获取Emby人物详情: {people.get('Name')}")
             return None
         
         def __get_id(p):
@@ -510,11 +508,10 @@ class personmetamod(_PluginBase):
 
         tmdb_details, tmdb_ext_ids = self.__get_tmdb_person_detail(tmdb_id)
         if not tmdb_details: 
-            logger.debug(f"      x [失败] 无法获取TMDB详情: ID {tmdb_id}")
+            logger.error(f"      x [失败] TMDB信息获取失败: ID {tmdb_id} (可能网络不通)")
             return None
 
         douban_match = None
-        match_source = ""
         if douban_actors:
             tmdb_name_cn = None
             if tmdb_details.get("name") and StringUtils.is_chinese(tmdb_details.get("name")):
@@ -523,12 +520,10 @@ class personmetamod(_PluginBase):
             for d in douban_actors:
                 if tmdb_name_cn and d.get("name") == tmdb_name_cn:
                     douban_match = d
-                    match_source = "中文名匹配"
                     break
                 if tmdb_details.get("name") and d.get("latin_name") and \
                    tmdb_details.get("name").lower() == d.get("latin_name").lower():
                     douban_match = d
-                    match_source = "英文名匹配"
                     break
 
         updated_global = False
@@ -574,7 +569,9 @@ class personmetamod(_PluginBase):
         img_source = ""
         _path = tmdb_details.get("profile_path")
         if _path:
-            final_img = f"https://{settings.TMDB_IMAGE_DOMAIN}/t/p/original{_path}"
+            # 优先使用配置的域名，否则默认
+            domain = getattr(settings, "TMDB_IMAGE_DOMAIN", "image.tmdb.org")
+            final_img = f"https://{domain}/t/p/original{_path}"
             img_source = "TMDB"
         elif douban_match:
             avatar = douban_match.get("avatar")
@@ -585,10 +582,17 @@ class personmetamod(_PluginBase):
                 final_img = avatar
                 img_source = "Douban"
         
+        # 只要找到了URL，就尝试下载，哪怕本地有PrimaryImageTag也尝试检查一下（此处保留原逻辑：本地无图才下）
         has_local_img = people.get("PrimaryImageTag") is not None
-        if final_img and not has_local_img:
-            if self.set_item_image(server=server, server_type=server_type, itemid=people.get("Id"), imageurl=final_img):
-                log_msgs.append(f"图片补全({img_source})")
+        
+        if final_img:
+            if not has_local_img:
+                # 传入人名用于日志
+                is_success = self.set_item_image(server, server_type, people.get("Id"), final_img, people.get("Name"))
+                if is_success:
+                    log_msgs.append(f"图片补全({img_source})")
+            # else:
+                # logger.debug(f"      - [跳过图片] {people.get('Name')} 已有图片")
 
         # --- (D) 社交ID ---
         id_mapping = {"imdb_id": "Imdb", "facebook_id": "Facebook", "instagram_id": "Instagram", "twitter_id": "Twitter"}
@@ -665,10 +669,8 @@ class personmetamod(_PluginBase):
         service = self.service_infos(server_type).get(server)
         if not service: return {}
         
-        # 【新增】写入锁，防止并发写入导致数据库锁死
         with self._write_lock:
             try:
-                # 强制等待1秒，给Emby一点喘息时间
                 time.sleep(1)
                 
                 url = f'[HOST]emby/Items/{itemid}?api_key=[APIKEY]&reqformat=json'
@@ -681,27 +683,42 @@ class personmetamod(_PluginBase):
                 pass
         return False
 
-    def set_item_image(self, server: str, server_type: str, itemid: str, imageurl: str):
+    def set_item_image(self, server: str, server_type: str, itemid: str, imageurl: str, person_name: str = "未知"):
         service = self.service_infos(server_type).get(server)
         if not service: return False
         
+        # 内嵌下载函数，增加详细日志
         def __download_image_with_retry(url, retries=3):
-            headers = {}
-            if "doubanio.com" in url: headers['Referer'] = "https://movie.douban.com/"
+            # 更加完善的Headers，防止被图床拦截
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+                'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            }
+            if "doubanio.com" in url: 
+                headers['Referer'] = "https://movie.douban.com/"
+            
             for i in range(retries):
                 try:
+                    # 使用配置的代理 settings.PROXY
                     r = RequestUtils(proxies=settings.PROXY, ua=settings.USER_AGENT, headers=headers).get_res(url=url, raise_exception=True)
-                    if r and r.status_code == 200: return base64.b64encode(r.content).decode()
-                except Exception: time.sleep(1)
+                    if r and r.status_code == 200: 
+                        return base64.b64encode(r.content).decode()
+                    else:
+                        logger.warning(f"      ! [{i+1}/{retries}] 下载失败 HTTP {r.status_code if r else 'Unknown'}: {url}")
+                except Exception as e:
+                    # 【关键修改】打印出具体的下载错误原因
+                    logger.warning(f"      ! [{i+1}/{retries}] 下载异常: {e} -> {url}")
+                    time.sleep(1)
             return None
             
         image_base64 = __download_image_with_retry(imageurl)
-        if not image_base64: return False
         
-        # 【新增】写入锁
+        if not image_base64: 
+            logger.error(f"      x [图片失败] {person_name}: 下载图片超时或无法连接 -> {imageurl}")
+            return False
+        
         with self._write_lock:
             try:
-                # 上传图片由于涉及IO，等待时间稍微长一点
                 time.sleep(1.5)
                 
                 url = f'[HOST]emby/Items/{itemid}/Images/Primary?api_key=[APIKEY]'
