@@ -38,7 +38,7 @@ class personmetamod(_PluginBase):
     # 插件图标
     plugin_icon = "actor.png"
     # 插件版本
-    plugin_version = "2.4.0_mod_v10_social_fix"
+    plugin_version = "2.4.1_mod_v11_fix_domain"
     # 插件作者
     plugin_author = "jxxghp"
     # 作者主页
@@ -529,8 +529,11 @@ class personmetamod(_PluginBase):
         try:
             # 构造请求 URL，同时请求详情和外部ID
             base_url = "https://api.themoviedb.org/3"
-            if settings.TMDB_DOMAIN: 
-                base_url = f"https://{settings.TMDB_DOMAIN}/3"
+            
+            # 使用 getattr 安全获取配置，防止 AttributeError
+            tmdb_domain = getattr(settings, "TMDB_DOMAIN", None)
+            if tmdb_domain: 
+                base_url = f"https://{tmdb_domain}/3"
             
             url = f"{base_url}/person/{tmdb_id}?api_key={settings.TMDB_API_KEY}&language=zh-CN&append_to_response=external_ids"
             
