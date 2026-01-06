@@ -30,10 +30,10 @@ from app.utils.string import StringUtils
 
 class personmetamod(_PluginBase):
     # 插件名称
-    plugin_name = "演职人员刮削(架构优化版v4.0)"
-    plugin_desc = "修复资源泄露、优化单集匹配逻辑、增强ID回写安全性。"
+    plugin_name = "演职人员刮削(v4.2稳健版)"
+    plugin_desc = "降低并发，增加写入缓冲，防止数据库锁死。"
     plugin_icon = "actor.png"
-    plugin_version = "4.0.0_optimized"
+    plugin_version = "4.2.0_stable"
     plugin_author = "jxxghp_mod_by_gemini"
     author_url = "https://github.com/jxxghp"
     plugin_config_prefix = "personmeta_mod_"
@@ -41,6 +41,7 @@ class personmetamod(_PluginBase):
     auth_level = 1
 
     _event = threading.Event()
+    _write_lock = threading.Lock()  # 【新增】写入锁
     _scheduler = None
     _enabled = False
     _onlyonce = False
@@ -51,10 +52,9 @@ class personmetamod(_PluginBase):
     _lock_info = False
     _mediaservers = []
     
-    # 缓存与资源
     _tmdb_person_cache = {}
     _tmdb_credits_cache = {}
-    _executor = None  # 全局线程池
+    _executor = None
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -71,9 +71,9 @@ class personmetamod(_PluginBase):
         self._tmdb_person_cache = {}
         self._tmdb_credits_cache = {}
         
-        # [优化1] 初始化全局线程池，避免重复创建销毁
         if not self._executor:
-            self._executor = ThreadPoolExecutor(max_workers=5)
+            # 【修改】将并发数降低为 2，保护数据库
+            self._executor = ThreadPoolExecutor(max_workers=2)
 
         if self._onlyonce:
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
@@ -81,7 +81,7 @@ class personmetamod(_PluginBase):
                                     run_date=datetime.datetime.now(
                                         tz=pytz.timezone(settings.TZ)) + datetime.timedelta(seconds=3)
                                     )
-            logger.info(f"{self.plugin_name} 服务启动，立即运行一次")
+            logger.info(f"【{self.plugin_name}】服务启动，立即运行一次")
             self._onlyonce = False
             self.__update_config()
             if self._scheduler.get_jobs():
@@ -114,14 +114,13 @@ class personmetamod(_PluginBase):
         if self._enabled and self._cron:
             return [{
                 "id": "personmetamod",
-                "name": "演职人员刮削服务(优化版)",
+                "name": "演职人员刮削服务(稳健版)",
                 "trigger": CronTrigger.from_crontab(self._cron),
                 "func": self.scrap_library,
                 "kwargs": {}
             }]
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        # 表单保持不变，略
         return [
             {
                 'component': 'VRow',
@@ -243,7 +242,6 @@ class personmetamod(_PluginBase):
         if existsinfo.server_type == 'plex': return
         iteminfo = MediaServerChain().iteminfo(server=existsinfo.server, item_id=existsinfo.itemid)
         if not iteminfo: return
-        # 实时刮削后也建议清理一下缓存，保持干净
         self._tmdb_person_cache.clear()
         self._tmdb_credits_cache.clear()
         self.__update_item(server=existsinfo.server, server_type=existsinfo.server_type,
@@ -254,39 +252,38 @@ class personmetamod(_PluginBase):
         if not service_infos: return
         mediaserverchain = MediaServerChain()
         
-        # [优化2] 处理计数器
         process_count = 0
         
         for server, service in service_infos.items():
-            logger.info(f"开始刮削服务器 {server} 的演员信息 (优化版) ...")
+            logger.info(f"【{self.plugin_name}】开始刮削服务器 {server} ...")
             for library in mediaserverchain.librarys(server):
-                logger.info(f"正在扫描媒体库: {library.name} ...")
+                logger.info(f"【{self.plugin_name}】正在扫描媒体库: {library.name}")
                 for item in mediaserverchain.items(server, library.id):
                     if not item or not item.item_id: continue
                     if "Series" not in item.item_type and "Movie" not in item.item_type: continue
                     if self._event.is_set(): return
                     self.__update_item(server=server, item=item, server_type=service.type)
                     
-                    # [优化2] 每处理 50 个条目清理一次缓存，防止 OOM
                     process_count += 1
                     if process_count % 50 == 0:
                         self._tmdb_person_cache.clear()
                         self._tmdb_credits_cache.clear()
                         
-                logger.info(f"媒体库 {library.name} 扫描完成")
+                logger.info(f"【{self.plugin_name}】媒体库 {library.name} 扫描完成")
         
-        # 最终清理
         self._tmdb_person_cache.clear()
         self._tmdb_credits_cache.clear()
 
     def __update_peoples(self, server: str, server_type: str,
                          itemid: str, iteminfo: dict, tmdb_credits: dict, douban_actors: list):
         people_list = iteminfo.get("People", []) or []
-        if not people_list: return
+        if not people_list:
+            logger.info(f"    - 跳过: 该条目没有演职人员信息")
+            return
 
+        logger.info(f"    - 开始并发处理 {len(people_list)} 位演职人员...")
         final_peoples = [None] * len(people_list)
         
-        # [优化1] 复用全局线程池，不再使用 with ThreadPoolExecutor
         future_to_index = {}
         for idx, people in enumerate(people_list):
             if self._event.is_set(): return
@@ -304,11 +301,9 @@ class personmetamod(_PluginBase):
                 final_peoples[idx] = people
                 continue
             
-            # 使用 self._executor
             future = self._executor.submit(self.__update_people, server, server_type, people, tmdb_credits, douban_actors)
             future_to_index[future] = idx
 
-        # 等待结果
         for future in as_completed(future_to_index):
             idx = future_to_index[future]
             original_data = people_list[idx]
@@ -320,13 +315,12 @@ class personmetamod(_PluginBase):
                     if not self._remove_nozh:
                         final_peoples[idx] = original_data
             except Exception as e:
-                logger.error(f"人物处理异常 {original_data.get('Name')}: {e}")
+                logger.error(f"    ! [异常] 处理 {original_data.get('Name')} 出错: {e}")
                 if not self._remove_nozh:
                     final_peoples[idx] = original_data
 
         valid_peoples = [p for p in final_peoples if p is not None]
         if valid_peoples:
-            # 只有当数据真的有变动时，建议通过对比来决定是否提交，这里简化处理直接提交
             iteminfo["People"] = valid_peoples
             self.set_iteminfo(server=server, server_type=server_type,
                               itemid=itemid, iteminfo=iteminfo)
@@ -334,34 +328,49 @@ class personmetamod(_PluginBase):
     def __update_item(self, server: str, item: MediaServerItem, server_type: str = None,
                       mediainfo: MediaInfo = None, season: int = None):
         
+        logger.info(f"--> [处理中] {item.title} (ID: {item.item_id})")
+
         def __need_trans_actor(_item):
             people_list = _item.get("People", []) or []
+            need = False
             for x in people_list:
                 name = x.get("Name")
                 if not name: continue
-                if not x.get("PrimaryImageTag"): return True
-                if not x.get("Overview"): return True
-                if self._type == "name" and not StringUtils.is_chinese(name): return True
-                if self._type == "role" and x.get("Role") and not StringUtils.is_chinese(x.get("Role")): return True
+                if not x.get("PrimaryImageTag"): 
+                    need = True; break
+                if not x.get("Overview"): 
+                    need = True; break
+                if self._type == "name" and not StringUtils.is_chinese(name): 
+                    need = True; break
                 if self._type == "all":
-                    if not StringUtils.is_chinese(name): return True
-            return False
+                    if not StringUtils.is_chinese(name): 
+                        need = True; break
+            return need
 
         if not mediainfo:
-            if not item.tmdbid: return
+            if not item.tmdbid: 
+                logger.info(f"    - 跳过: 无TMDB ID")
+                return
             mtype = MediaType.TV if item.item_type in ['Series', 'show'] else MediaType.MOVIE
             mediainfo = self.chain.recognize_media(mtype=mtype, tmdbid=item.tmdbid)
-            if not mediainfo: return
+            if not mediainfo: 
+                logger.info(f"    - 跳过: 无法识别媒体信息")
+                return
 
         iteminfo = self.get_iteminfo(server=server, server_type=server_type, itemid=item.item_id)
         if not iteminfo: return
 
         if __need_trans_actor(iteminfo):
+            logger.info(f"    + 获取 TMDB Credits (ID: {mediainfo.tmdb_id})...")
             tmdb_credits = self.__get_tmdb_credits(mediainfo.tmdb_id, mediainfo.type, season=season)
+            logger.info(f"    + 获取 豆瓣信息...")
             douban_actors = self.__get_douban_actors(mediainfo, season)
+            
             self.__update_peoples(server=server, server_type=server_type,
                                   itemid=item.item_id, iteminfo=iteminfo, 
                                   tmdb_credits=tmdb_credits, douban_actors=douban_actors)
+        else:
+            logger.info(f"    - 跳过: 检查通过，无需更新")
 
         if iteminfo.get("Type") and "Series" in iteminfo["Type"]:
             seasons = self.get_items(server=server, server_type=server_type,
@@ -370,11 +379,11 @@ class personmetamod(_PluginBase):
             
             for season_item in seasons.get("Items", []):
                 season_num = season_item.get("IndexNumber")
-                # [优化4] 季的Credits
+                logger.info(f"    > 处理第 {season_num} 季...")
+                
                 season_credits = self.__get_tmdb_credits(mediainfo.tmdb_id, MediaType.TV, season=season_num)
                 douban_actors = self.__get_douban_actors(mediainfo, season_num)
                 
-                # 处理季本身的演员 (通常很少，但保留逻辑)
                 if server_type == "jellyfin":
                     seasoninfo = self.get_iteminfo(server=server, server_type=server_type, itemid=season_item.get("Id"))
                     if seasoninfo and __need_trans_actor(seasoninfo):
@@ -382,7 +391,6 @@ class personmetamod(_PluginBase):
                                               itemid=season_item.get("Id"), iteminfo=seasoninfo,
                                               tmdb_credits=season_credits, douban_actors=douban_actors)
                 
-                # 处理单集
                 episodes = self.get_items(server=server, server_type=server_type,
                                           parentid=season_item.get("Id"), mtype="Episode")
                 if not episodes: continue
@@ -391,20 +399,15 @@ class personmetamod(_PluginBase):
                     episodeinfo = self.get_iteminfo(server=server, server_type=server_type, itemid=episode.get("Id"))
                     
                     if episodeinfo and __need_trans_actor(episodeinfo):
-                        # [优化4] 尝试获取单集的 Credits，如果获取失败或为空，才回退到 Season Credits
-                        # 注意：TMDB API 支持 GET /tv/{series_id}/season/{season_number}/episode/{episode_number}/credits
                         episode_credits = self.__get_tmdb_credits(mediainfo.tmdb_id, MediaType.TV, season=season_num, episode=episode_num)
-                        
                         target_credits = episode_credits if episode_credits and (episode_credits.get("cast") or episode_credits.get("crew")) else season_credits
                         
                         self.__update_peoples(server=server, server_type=server_type,
                                               itemid=episode.get("Id"), iteminfo=episodeinfo,
                                               tmdb_credits=target_credits, douban_actors=douban_actors)
 
-    # [优化4] 增加 episode 参数支持单集查询
     def __get_tmdb_credits(self, tmdb_id: int, mtype: MediaType, season: int = None, episode: int = None) -> dict:
         if not settings.TMDB_API_KEY or not tmdb_id: return {}
-        # key 包含 episode
         cache_key = f"{mtype}_{tmdb_id}_{season}_{episode}"
         if cache_key in self._tmdb_credits_cache: return self._tmdb_credits_cache[cache_key]
         
@@ -416,10 +419,8 @@ class personmetamod(_PluginBase):
         if mtype == MediaType.MOVIE:
             url = f"{base_url}/movie/{tmdb_id}/credits?api_key={settings.TMDB_API_KEY}&language=zh-CN"
         else:
-            # 剧集处理逻辑
             if season is not None:
                 if episode is not None:
-                     # 单集接口
                      url = f"{base_url}/tv/{tmdb_id}/season/{season}/episode/{episode}/credits?api_key={settings.TMDB_API_KEY}&language=zh-CN"
                 else:
                      url = f"{base_url}/tv/{tmdb_id}/season/{season}/credits?api_key={settings.TMDB_API_KEY}&language=zh-CN"
@@ -436,8 +437,6 @@ class personmetamod(_PluginBase):
         return {}
 
     def __get_douban_actors(self, mediainfo: MediaInfo, season: int = None) -> List[dict]:
-        # 略微降低频率限制
-        # time.sleep(0.5) 
         doubaninfo = self.chain.match_doubaninfo(name=mediainfo.title,
                                                  imdbid=mediainfo.imdb_id,
                                                  mtype=mediainfo.type,
@@ -446,6 +445,8 @@ class personmetamod(_PluginBase):
         if doubaninfo:
             doubanitem = self.chain.douban_info(doubaninfo.get("id")) or {}
             return (doubanitem.get("actors") or []) + (doubanitem.get("directors") or [])
+        else:
+            pass
         return []
 
     def __get_tmdb_person_detail(self, tmdb_id: str) -> Tuple[Optional[dict], Optional[dict]]:
@@ -474,9 +475,10 @@ class personmetamod(_PluginBase):
         
         ret_people = copy.deepcopy(people)
         
-        # 1. 确定 TMDB ID
         personinfo = self.get_iteminfo(server=server, server_type=server_type, itemid=people.get("Id"))
-        if not personinfo: return None
+        if not personinfo: 
+            logger.debug(f"      x [失败] 无法获取Emby人物详情: {people.get('Name')}")
+            return None
         
         def __get_id(p):
             if not p.get("ProviderIds"): return None
@@ -488,19 +490,15 @@ class personmetamod(_PluginBase):
         crew_list = tmdb_credits.get("crew", [])
         all_credits = cast_list + crew_list
         
-        # [优化5] ID匹配逻辑
-        # 如果本地有ID，优先用ID找credit
         if tmdb_id:
             for c in all_credits:
                 if str(c.get("id")) == str(tmdb_id):
                     matched_credit = c
                     break
         
-        # 如果没找到credit（可能本地ID错了）或者本地没ID，用名字找
         if not matched_credit:
             current_name = people.get("Name")
             for c in all_credits:
-                # 增加大小写不敏感比对
                 if (c.get("name") and c.get("name").lower() == current_name.lower()) or \
                    (c.get("original_name") and c.get("original_name").lower() == current_name.lower()):
                     matched_credit = c
@@ -510,12 +508,13 @@ class personmetamod(_PluginBase):
         if not tmdb_id:
             return None
 
-        # 2. 获取 TMDB 详情
         tmdb_details, tmdb_ext_ids = self.__get_tmdb_person_detail(tmdb_id)
-        if not tmdb_details: return None
+        if not tmdb_details: 
+            logger.debug(f"      x [失败] 无法获取TMDB详情: ID {tmdb_id}")
+            return None
 
-        # 3. 豆瓣匹配
         douban_match = None
+        match_source = ""
         if douban_actors:
             tmdb_name_cn = None
             if tmdb_details.get("name") and StringUtils.is_chinese(tmdb_details.get("name")):
@@ -524,15 +523,18 @@ class personmetamod(_PluginBase):
             for d in douban_actors:
                 if tmdb_name_cn and d.get("name") == tmdb_name_cn:
                     douban_match = d
+                    match_source = "中文名匹配"
                     break
                 if tmdb_details.get("name") and d.get("latin_name") and \
                    tmdb_details.get("name").lower() == d.get("latin_name").lower():
                     douban_match = d
+                    match_source = "英文名匹配"
                     break
 
         updated_global = False
+        log_msgs = []
 
-        # --- (A) 姓名逻辑 ---
+        # --- (A) 姓名 ---
         final_name = None
         tmdb_name = tmdb_details.get("name")
         
@@ -549,8 +551,9 @@ class personmetamod(_PluginBase):
                 personinfo["Name"] = final_name
                 updated_global = True
                 ret_people["Name"] = final_name
+                log_msgs.append(f"姓名更新[{final_name}]")
 
-        # --- (B) 简介逻辑 ---
+        # --- (B) 简介 ---
         final_bio = None
         tmdb_bio = tmdb_details.get("biography")
         
@@ -564,39 +567,40 @@ class personmetamod(_PluginBase):
             if final_bio != personinfo.get("Overview"):
                 personinfo["Overview"] = final_bio
                 updated_global = True
+                log_msgs.append("简介更新")
 
-        # --- (C) 图片逻辑 ---
+        # --- (C) 图片 ---
         final_img = None
+        img_source = ""
         _path = tmdb_details.get("profile_path")
         if _path:
             final_img = f"https://{settings.TMDB_IMAGE_DOMAIN}/t/p/original{_path}"
+            img_source = "TMDB"
         elif douban_match:
             avatar = douban_match.get("avatar")
             if isinstance(avatar, dict) and avatar.get("large"):
                 final_img = avatar.get("large")
+                img_source = "Douban"
             elif isinstance(avatar, str) and avatar:
                 final_img = avatar
+                img_source = "Douban"
         
         has_local_img = people.get("PrimaryImageTag") is not None
         if final_img and not has_local_img:
             if self.set_item_image(server=server, server_type=server_type, itemid=people.get("Id"), imageurl=final_img):
-                # [优化3] 关键修改：不要手动设置 "new"，让Emby自己生成Hash
-                # ret_people["PrimaryImageTag"] = "new" 
-                pass
+                log_msgs.append(f"图片补全({img_source})")
 
         # --- (D) 社交ID ---
         id_mapping = {"imdb_id": "Imdb", "facebook_id": "Facebook", "instagram_id": "Instagram", "twitter_id": "Twitter"}
         current_pids = personinfo.get("ProviderIds", {})
         pids_updated = False
         
-        # 强制更新 TMDB ID (防止之前是靠名字匹配进来的，ID没写进去)
         if str(tmdb_id) != str(current_pids.get("Tmdb", "")):
             current_pids["Tmdb"] = str(tmdb_id)
             pids_updated = True
             
         for tmdb_k, emby_k in id_mapping.items():
             val = tmdb_ext_ids.get(tmdb_k)
-            # 只有当值非空且不一致时才更新，防止把已有的ID覆盖为空
             if val and str(val) != str(current_pids.get(emby_k, "")):
                 current_pids[emby_k] = str(val)
                 pids_updated = True
@@ -604,6 +608,7 @@ class personmetamod(_PluginBase):
         if pids_updated:
             personinfo["ProviderIds"] = current_pids
             updated_global = True
+            log_msgs.append("ID回写")
 
         # --- (E) 角色名 ---
         final_role = None
@@ -626,11 +631,11 @@ class personmetamod(_PluginBase):
             self.set_iteminfo(server=server, server_type=server_type,
                               itemid=people.get("Id"), iteminfo=personinfo)
         
+        if log_msgs:
+            logger.info(f"      √ [更新] {people.get('Name')} -> {final_name or people.get('Name')}: {', '.join(log_msgs)}")
+        
         return ret_people
 
-    # 下面的辅助方法保持不变 (get_iteminfo, set_iteminfo, set_item_image, stop_service)
-    # 建议加上 stop_service 中关闭 executor 的逻辑
-    
     def get_iteminfo(self, server: str, server_type: str, itemid: str) -> dict:
         service = self.service_infos(server_type).get(server)
         if not service: return {}
@@ -659,18 +664,27 @@ class personmetamod(_PluginBase):
     def set_iteminfo(self, server: str, server_type: str, itemid: str, iteminfo: dict):
         service = self.service_infos(server_type).get(server)
         if not service: return {}
-        try:
-            url = f'[HOST]emby/Items/{itemid}?api_key=[APIKEY]&reqformat=json'
-            if server_type == "jellyfin":
-                url = f'[HOST]Items/{itemid}?api_key=[APIKEY]'
-            service.instance.post_data(url=url, data=json.dumps(iteminfo), headers={"Content-Type": "application/json"})
-            return True
-        except Exception: pass
+        
+        # 【新增】写入锁，防止并发写入导致数据库锁死
+        with self._write_lock:
+            try:
+                # 强制等待1秒，给Emby一点喘息时间
+                time.sleep(1)
+                
+                url = f'[HOST]emby/Items/{itemid}?api_key=[APIKEY]&reqformat=json'
+                if server_type == "jellyfin":
+                    url = f'[HOST]Items/{itemid}?api_key=[APIKEY]'
+                service.instance.post_data(url=url, data=json.dumps(iteminfo), headers={"Content-Type": "application/json"})
+                return True
+            except Exception as e:
+                logger.error(f"      x [入库失败] ItemID: {itemid} - {e}")
+                pass
         return False
 
     def set_item_image(self, server: str, server_type: str, itemid: str, imageurl: str):
         service = self.service_infos(server_type).get(server)
         if not service: return False
+        
         def __download_image_with_retry(url, retries=3):
             headers = {}
             if "doubanio.com" in url: headers['Referer'] = "https://movie.douban.com/"
@@ -680,14 +694,23 @@ class personmetamod(_PluginBase):
                     if r and r.status_code == 200: return base64.b64encode(r.content).decode()
                 except Exception: time.sleep(1)
             return None
+            
         image_base64 = __download_image_with_retry(imageurl)
         if not image_base64: return False
-        try:
-            url = f'[HOST]emby/Items/{itemid}/Images/Primary?api_key=[APIKEY]'
-            if server_type == "jellyfin": url = f'[HOST]Items/{itemid}/Images/Primary?api_key=[APIKEY]'
-            res = service.instance.post_data(url=url, data=image_base64, headers={"Content-Type": "image/png"})
-            if res and res.status_code in [200, 204]: return True
-        except Exception: pass
+        
+        # 【新增】写入锁
+        with self._write_lock:
+            try:
+                # 上传图片由于涉及IO，等待时间稍微长一点
+                time.sleep(1.5)
+                
+                url = f'[HOST]emby/Items/{itemid}/Images/Primary?api_key=[APIKEY]'
+                if server_type == "jellyfin": url = f'[HOST]Items/{itemid}/Images/Primary?api_key=[APIKEY]'
+                res = service.instance.post_data(url=url, data=image_base64, headers={"Content-Type": "image/png"})
+                if res and res.status_code in [200, 204]: return True
+            except Exception as e:
+                logger.error(f"      x [图片上传失败] ItemID: {itemid} - {e}")
+                pass
         return False
 
     def stop_service(self):
@@ -699,7 +722,6 @@ class personmetamod(_PluginBase):
                     self._scheduler.shutdown()
                     self._event.clear()
                 self._scheduler = None
-            # 关闭线程池
             if self._executor:
                 self._executor.shutdown(wait=False)
                 self._executor = None
