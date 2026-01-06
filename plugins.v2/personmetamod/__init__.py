@@ -35,11 +35,11 @@ class personmetamod(_PluginBase):
     # 插件名称
     plugin_name = "演职人员刮削(自由版)"
     # 插件描述
-    plugin_desc = "混合策略(豆瓣/TMDB)，支持社交ID同步，智能补全缺失图片/简介。"
+    plugin_desc = "混合策略(豆瓣/TMDB)，支持社交ID同步，智能补全缺失图片/简介，多线程保序处理。"
     # 插件图标
     plugin_icon = "actor.png"
     # 插件版本
-    plugin_version = "2.5.0_opt_concurrency"
+    plugin_version = "2.6.0_ordered_concurrent"
     # 插件作者
     plugin_author = "jxxghp"
     # 作者主页
@@ -65,7 +65,7 @@ class personmetamod(_PluginBase):
     _lock_info = False
     _mediaservers = []
     
-    # 内存缓存，减少重复请求
+    # 简单的内存缓存，减少重复请求 (key=tmdb_id, value=data)
     _tmdb_cache = {}
 
     def init_plugin(self, config: dict = None):
@@ -301,70 +301,86 @@ class personmetamod(_PluginBase):
                     self.__update_item(server=server, item=item, server_type=service.type)
                 logger.info(f"媒体库 {library.name} 的演员信息刮削完成")
             logger.info(f"服务器 {server} 的演员信息刮削完成")
-            # 清理一次缓存
+            # 扫描完一个服务器清理一次缓存
             self._tmdb_cache.clear()
 
     def __update_peoples(self, server: str, server_type: str,
                          itemid: str, iteminfo: dict, douban_actors):
-        peoples = []
+        """
+        并发处理演员信息，但严格保持原始顺序 (Index-based)
+        """
         people_list = iteminfo.get("People", []) or []
-        
         if not people_list:
             return
 
-        # 并发处理配置
-        max_workers = 5  # 建议不要超过 5-10，防止 TMDB API 速率限制
+        # 1. 初始化结果占位列表 (长度与原始列表一致)
+        # 默认值为 None，表示该位置待处理
+        final_peoples = [None] * len(people_list)
+        
+        # 并发池
+        max_workers = 5
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_people = {}
-            for people in people_list:
+            future_to_index = {}
+            
+            for idx, people in enumerate(people_list):
                 if self._event.is_set():
                     return
+                
+                # 如果没名字，直接保留原样，填入结果表
                 if not people.get("Name"):
+                    final_peoples[idx] = people
                     continue
 
-                # --- 智能跳过逻辑 (优化版) ---
+                # --- 智能跳过逻辑 ---
                 has_image = people.get("PrimaryImageTag") is not None
-                # 部分服务器Overview为空是null，部分是空字符串
-                has_overview = bool(people.get("Overview"))
                 is_zh_name = StringUtils.is_chinese(people.get("Name"))
                 is_zh_role = StringUtils.is_chinese(people.get("Role"))
                 
-                # 如果：名字中文 + 角色中文 + 有图 + (可选:有简介)，则跳过
-                # 这里我们假设有图和名字中文就足够好，不强制要求简介，提高速度
-                # 如果你想强制补全简介，把 has_overview 加入判断即可
+                # 只有：名字中文 + 角色中文 + 有图，才跳过 (完全满意)
                 if is_zh_name and is_zh_role and has_image:
-                    peoples.append(people)
+                    final_peoples[idx] = people
                     continue
                 
-                # 提交线程任务
+                # 否则提交任务，并记录 Index
                 future = executor.submit(self.__update_people, server, server_type, people, douban_actors)
-                future_to_people[future] = people
+                future_to_index[future] = idx
 
-            # 获取并发结果
-            for future in as_completed(future_to_people):
-                original_people = future_to_people[future]
+            # 2. 回收结果，填入对应的坑位
+            for future in as_completed(future_to_index):
+                idx = future_to_index[future]
+                original_data = people_list[idx]
                 try:
-                    info = future.result()
-                    if info:
-                        peoples.append(info)
-                    elif not self._remove_nozh:
-                        peoples.append(original_people)
+                    updated_data = future.result()
+                    if updated_data:
+                        final_peoples[idx] = updated_data
+                    else:
+                        # 如果处理失败或返回None，根据配置决定去留
+                        if not self._remove_nozh:
+                            final_peoples[idx] = original_data
+                        else:
+                            # 如果开启了删除非中文，且处理失败，这里留 None
+                            # 后续清理步骤会把 None 删掉
+                            pass
                 except Exception as e:
-                    logger.error(f"处理人物 {original_people.get('Name')} 异常: {e}")
+                    logger.error(f"处理人物 {original_data.get('Name')} 异常: {e}")
                     if not self._remove_nozh:
-                        peoples.append(original_people)
+                        final_peoples[idx] = original_data
 
-        # 保存媒体项信息
-        if peoples:
-            iteminfo["People"] = peoples
+        # 3. 清理结果 (去除 None)
+        # 如果 _remove_nozh=False，上面都会有兜底值，除了本来就是None的情况
+        valid_peoples = [p for p in final_peoples if p is not None]
+
+        # 4. 提交保存 (此时 valid_peoples 的顺序与 iteminfo['People'] 严格一致)
+        if valid_peoples:
+            iteminfo["People"] = valid_peoples
             self.set_iteminfo(server=server, server_type=server_type,
                               itemid=itemid, iteminfo=iteminfo)
 
     def __update_item(self, server: str, item: MediaServerItem, server_type: str = None,
                       mediainfo: MediaInfo = None, season: int = None):
         
-        # 内部判断函数：是否需要处理
+        # 内部判断：是否需要处理
         def __need_trans_actor(_item):
             people_list = _item.get("People", []) or []
             for x in people_list:
@@ -387,7 +403,6 @@ class personmetamod(_PluginBase):
                     if role and not StringUtils.is_chinese(role): return True
             return False
 
-        # 识别媒体信息
         if not mediainfo:
             if not item.tmdbid:
                 return
@@ -396,34 +411,29 @@ class personmetamod(_PluginBase):
             if not mediainfo:
                 return
 
-        # 获取媒体项
         iteminfo = self.get_iteminfo(server=server, server_type=server_type, itemid=item.item_id)
         if not iteminfo:
             return
 
-        # 只要有一项需要处理，就获取豆瓣信息（只获取一次）
         douban_actors = []
         if __need_trans_actor(iteminfo):
             douban_actors = self.__get_douban_actors(mediainfo=mediainfo, season=season)
             self.__update_peoples(server=server, server_type=server_type,
                                   itemid=item.item_id, iteminfo=iteminfo, douban_actors=douban_actors)
 
-        # 处理 Series 的季和集
+        # 处理 Series
         if iteminfo.get("Type") and "Series" in iteminfo["Type"]:
             seasons = self.get_items(server=server, server_type=server_type,
                                      parentid=item.item_id, mtype="Season")
             if not seasons:
                 return
             
-            # 缓存一下季度的豆瓣信息，避免每一集都重新请求豆瓣
-            # 注意：不同季度的演员可能不同，这里简化处理，仍然按季获取
-            
             for season_item in seasons.get("Items", []):
                 season_num = season_item.get("IndexNumber")
-                # 针对该季获取一次豆瓣信息
+                # 按季获取豆瓣 (缓存或新请求)
                 season_actors = self.__get_douban_actors(mediainfo=mediainfo, season=season_num)
                 
-                # Jellyfin 季也有人物
+                # Jellyfin 季处理
                 if server_type == "jellyfin":
                     seasoninfo = self.get_iteminfo(server=server, server_type=server_type, itemid=season_item.get("Id"))
                     if seasoninfo and __need_trans_actor(seasoninfo):
@@ -431,7 +441,7 @@ class personmetamod(_PluginBase):
                                               itemid=season_item.get("Id"), iteminfo=seasoninfo,
                                               douban_actors=season_actors)
                 
-                # 处理集
+                # Episode 处理
                 episodes = self.get_items(server=server, server_type=server_type,
                                           parentid=season_item.get("Id"), mtype="Episode")
                 if not episodes:
@@ -452,6 +462,7 @@ class personmetamod(_PluginBase):
         if tmdb_id in self._tmdb_cache:
             return self._tmdb_cache[tmdb_id]
 
+        # 3次重试机制
         retry_count = 3
         for i in range(retry_count):
             try:
@@ -470,7 +481,6 @@ class personmetamod(_PluginBase):
                     self._tmdb_cache[tmdb_id] = (data, external_ids)
                     return data, external_ids
                 elif res and res.status_code == 429:
-                    # 速率限制
                     time.sleep(2)
             except Exception as e:
                 logger.debug(f"请求TMDB失败(第{i+1}次): {e}")
@@ -481,7 +491,6 @@ class personmetamod(_PluginBase):
     def __update_people(self, server: str, server_type: str,
                         people: dict, douban_actors: list = None) -> Optional[dict]:
         original_name = people.get("Name")
-        # logger.debug(f"处理: {original_name}")
 
         def __get_peopleid(p: dict) -> str:
             if not p.get("ProviderIds"):
@@ -506,7 +515,7 @@ class personmetamod(_PluginBase):
             tmdb_name_cn, tmdb_name_en, tmdb_overview_cn, tmdb_overview_en, tmdb_img = None, None, None, None, None
             tmdb_external_ids = {}
             
-            # --- TMDB 数据 ---
+            # --- TMDB 获取 ---
             person_tmdbid = __get_peopleid(personinfo)
             if person_tmdbid:
                 tmdb_details, tmdb_ext_ids = self.__get_tmdb_extra_info(person_tmdbid)
@@ -539,7 +548,7 @@ class personmetamod(_PluginBase):
                         douban_match = douban_actor
                         break
 
-            # --- 决策 (Name) ---
+            # --- 决策 Name ---
             douban_name = douban_match.get("name") if douban_match else None
             if douban_name and StringUtils.is_chinese(douban_name):
                 final_name = douban_name
@@ -551,7 +560,7 @@ class personmetamod(_PluginBase):
             if final_name:
                 final_name = __to_zh_cn(final_name)
 
-            # --- 决策 (Overview) ---
+            # --- 决策 Overview ---
             if tmdb_overview_cn:
                 final_overview = tmdb_overview_cn
             elif tmdb_overview_en:
@@ -562,9 +571,7 @@ class personmetamod(_PluginBase):
             if final_overview:
                 final_overview = __to_zh_cn(final_overview)
 
-            # --- 决策 (Image) ---
-            # 逻辑优化：如果本地已有 PrimaryImageTag，且我们这次没拿到更好的图，就不更新
-            # 但如果本地没图，必须更新
+            # --- 决策 Image ---
             has_local_img = people.get("PrimaryImageTag") is not None
             
             img_source = "None"
@@ -581,7 +588,7 @@ class personmetamod(_PluginBase):
                 final_img = tmdb_img
                 img_source = "TMDB"
 
-            # --- 决策 (Role) ---
+            # --- 决策 Role ---
             final_role = None
             if douban_match and douban_match.get("character"):
                 raw_char = douban_match.get("character")
@@ -590,9 +597,9 @@ class personmetamod(_PluginBase):
                 if cleaned_role and cleaned_role not in blacklist_roles:
                     final_role = __to_zh_cn(cleaned_role)
 
-            # --- 执行更新 ---
+            # --- 更新操作 ---
 
-            # 1. 社交 ID
+            # 1. External IDs
             id_mapping = {"imdb_id": "Imdb", "facebook_id": "Facebook", "instagram_id": "Instagram", "twitter_id": "Twitter"}
             current_pids = personinfo.get("ProviderIds", {})
             pids_updated = False
@@ -606,7 +613,7 @@ class personmetamod(_PluginBase):
                 personinfo["ProviderIds"] = current_pids
                 updated_global = True
 
-            # 2. 全局信息
+            # 2. Global Info
             if final_name and final_name != personinfo.get("Name"):
                 personinfo["Name"] = final_name
                 updated_global = True
@@ -615,18 +622,16 @@ class personmetamod(_PluginBase):
                 personinfo["Overview"] = final_overview
                 updated_global = True
 
-            # 3. 图片 (重点优化：如果没图，或者找到了新图且不完全相同，尝试更新)
-            # 这里简化逻辑：只要找到了 final_img，且（强制刷新 或 原本没图），就下载
-            # 由于不好比对 URL，策略是：如果原本没图，一定下。如果原本有图，暂不覆盖（除非你希望强制覆盖，可自行修改逻辑）
+            # 3. Image (Retry included inside set_item_image)
+            # 策略：如果没图，则下载。如果本来就有图，通常不覆盖（除非你希望强制覆盖，可删掉 not has_local_img）
             if final_img and not has_local_img:
-                logger.info(f"正在补全图片 ({img_source}): {final_name}")
+                logger.info(f"补全图片 [{img_source}]: {final_name}")
                 if self.set_item_image(server=server, server_type=server_type, itemid=people.get("Id"), imageurl=final_img):
-                    # 更新成功后，为了防止前端显示滞后，标记一下
                     ret_people["PrimaryImageTag"] = "new" 
                 else:
                     logger.warn(f"图片下载失败: {final_name}")
 
-            # 4. 锁定逻辑
+            # 4. Lock Info
             if self._lock_info and updated_global:
                 if "LockedFields" not in personinfo: personinfo["LockedFields"] = []
                 for f in ["Name", "Overview"]:
@@ -636,19 +641,15 @@ class personmetamod(_PluginBase):
             if updated_global:
                 self.set_iteminfo(server=server, server_type=server_type,
                                   itemid=people.get("Id"), iteminfo=personinfo)
-                # 名字变了要同步回 ret_people
                 ret_people["Name"] = personinfo["Name"]
-                # 角色更新
                 if final_role: ret_people["Role"] = final_role
                 return ret_people
             
-            # 仅角色更新
             if final_role:
                 ret_people["Role"] = final_role
                 if final_name: ret_people["Name"] = final_name
                 return ret_people
 
-            # 如果只是名字本地变了（繁转简），也要返回
             if final_name and final_name != people.get("Name"):
                  ret_people["Name"] = final_name
                  return ret_people
@@ -659,8 +660,6 @@ class personmetamod(_PluginBase):
         return None
 
     def __get_douban_actors(self, mediainfo: MediaInfo, season: int = None) -> List[dict]:
-        # 优化：如果是单次触发，或者缓存中已有，减少 sleep
-        # 但为了安全起见，保留一定延迟
         time.sleep(2) 
         doubaninfo = self.chain.match_doubaninfo(name=mediainfo.title,
                                                  imdbid=mediainfo.imdb_id,
@@ -717,7 +716,6 @@ class personmetamod(_PluginBase):
         service = self.service_infos(server_type).get(server)
         if not service: return False
 
-        # 增加下载重试逻辑
         def __download_image_with_retry(url, retries=3):
             headers = {}
             if "doubanio.com" in url:
@@ -743,7 +741,6 @@ class personmetamod(_PluginBase):
             if server_type == "jellyfin":
                 url = f'[HOST]Items/{itemid}/Images/Primary?api_key=[APIKEY]'
             
-            # 推送也尝试一次，通常一次就够，因为是内网/直连
             res = service.instance.post_data(url=url, data=image_base64, headers={"Content-Type": "image/png"})
             if res and res.status_code in [200, 204]: 
                 return True
