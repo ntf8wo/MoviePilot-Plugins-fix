@@ -34,11 +34,11 @@ class personmetamod(_PluginBase):
     # 插件名称
     plugin_name = "演职人员刮削(自由版)"
     # 插件描述
-    plugin_desc = "混合策略(豆瓣/TMDB)，支持繁转简，Emby/Jellyfin专用。"
+    plugin_desc = "混合策略(豆瓣/TMDB)，支持社交媒体ID同步，Emby/Jellyfin专用。"
     # 插件图标
     plugin_icon = "actor.png"
     # 插件版本
-    plugin_version = "2.3.3_mod_v9_optional_lock"
+    plugin_version = "2.4.0_mod_v10_social_fix"
     # 插件作者
     plugin_author = "jxxghp"
     # 作者主页
@@ -293,7 +293,7 @@ class personmetamod(_PluginBase):
                                 'props': {
                                     'model': 'lock_info',
                                     'label': '锁定元数据 (可选)',
-                                    'hint': '开启后，修改过的信息将被锁定(Name/Overview)，防止被NFO覆盖。建议保持关闭。',
+                                    'hint': '开启后，修改过的信息(姓名/简介)将被锁定，防止被NFO/刷新覆盖。建议保持关闭。',
                                 }
                             }
                         ]
@@ -319,13 +319,13 @@ class personmetamod(_PluginBase):
         服务信息
         """
         if not self._mediaservers:
-            logger.warning("尚未配置媒体服务器，请检查配置")
+            # logger.warning("尚未配置媒体服务器，请检查配置")
             return None
 
         # 过滤 Emby 和 Jellyfin
         services = MediaServerHelper().get_services(type_filter=type_filter, name_filters=self._mediaservers)
         if not services:
-            logger.warning("获取媒体服务器实例失败，请检查配置")
+            # logger.warning("获取媒体服务器实例失败，请检查配置")
             return None
 
         active_services = {}
@@ -333,12 +333,13 @@ class personmetamod(_PluginBase):
             if service_info.type == 'plex':
                 continue
             if service_info.instance.is_inactive():
-                logger.warning(f"媒体服务器 {service_name} 未连接，请检查配置")
+                # logger.warning(f"媒体服务器 {service_name} 未连接，请检查配置")
+                pass
             else:
                 active_services[service_name] = service_info
 
         if not active_services:
-            logger.warning("没有已连接的媒体服务器 (Emby/Jellyfin)，请检查配置")
+            # logger.warning("没有已连接的媒体服务器 (Emby/Jellyfin)，请检查配置")
             return None
 
         return active_services
@@ -405,7 +406,7 @@ class personmetamod(_PluginBase):
                         logger.info(f"演职人员刮削服务停止")
                         return
                     # 处理条目
-                    logger.debug(f"开始刮削 {item.title} 的演员信息 ...")
+                    # logger.debug(f"开始刮削 {item.title} 的演员信息 ...")
                     self.__update_item(server=server, item=item, server_type=service.type)
                 logger.info(f"媒体库 {library.name} 的演员信息刮削完成")
             logger.info(f"服务器 {server} 的演员信息刮削完成")
@@ -465,7 +466,7 @@ class personmetamod(_PluginBase):
         # 识别媒体信息
         if not mediainfo:
             if not item.tmdbid:
-                logger.debug(f"{item.title} 未找到tmdbid，无法识别媒体信息")
+                # logger.debug(f"{item.title} 未找到tmdbid，无法识别媒体信息")
                 return
             mtype = MediaType.TV if item.item_type in ['Series', 'show'] else MediaType.MOVIE
             mediainfo = self.chain.recognize_media(mtype=mtype, tmdbid=item.tmdbid)
@@ -517,6 +518,32 @@ class personmetamod(_PluginBase):
                                               itemid=episode.get("Id"), iteminfo=episodeinfo,
                                               douban_actors=season_actors)
 
+    def __get_tmdb_extra_info(self, tmdb_id: str) -> Tuple[Optional[dict], Optional[dict]]:
+        """
+        直接请求TMDB获取详情和external_ids，不依赖chain
+        返回: (details_dict, external_ids_dict)
+        """
+        if not settings.TMDB_API_KEY or not tmdb_id:
+            return None, None
+        
+        try:
+            # 构造请求 URL，同时请求详情和外部ID
+            base_url = "https://api.themoviedb.org/3"
+            if settings.TMDB_DOMAIN: 
+                base_url = f"https://{settings.TMDB_DOMAIN}/3"
+            
+            url = f"{base_url}/person/{tmdb_id}?api_key={settings.TMDB_API_KEY}&language=zh-CN&append_to_response=external_ids"
+            
+            res = RequestUtils(proxies=settings.PROXY, ua=settings.USER_AGENT).get_res(url=url)
+            if res and res.status_code == 200:
+                data = res.json()
+                external_ids = data.get("external_ids", {})
+                return data, external_ids
+        except Exception as e:
+            logger.warn(f"请求TMDB外部信息失败: {e}")
+        
+        return None, None
+
     def __update_people(self, server: str, server_type: str,
                         people: dict, douban_actors: list = None) -> Optional[dict]:
         """
@@ -526,13 +553,12 @@ class personmetamod(_PluginBase):
         logger.debug(f"正在处理人物: {original_name} (ID: {people.get('Id')}) ...")
 
         # 辅助函数：获取 TMDB ID
-        def __get_peopleid(p: dict) -> Tuple[Optional[str], Optional[str]]:
+        def __get_peopleid(p: dict) -> str:
             if not p.get("ProviderIds"):
-                return None, None
+                return None
             pid = p["ProviderIds"]
             peopletmdbid = pid.get("Tmdb") or pid.get("tmdb")
-            peopleimdbid = pid.get("Imdb") or pid.get("imdb")
-            return peopletmdbid, peopleimdbid
+            return peopletmdbid
 
         # 辅助函数：繁转简
         def __to_zh_cn(text: str) -> str:
@@ -565,35 +591,51 @@ class personmetamod(_PluginBase):
             tmdb_overview_cn = None
             tmdb_overview_en = None
             tmdb_img = None
+            tmdb_external_ids = {}
             
-            person_tmdbid, _ = __get_peopleid(personinfo)
+            person_tmdbid = __get_peopleid(personinfo)
             if person_tmdbid:
-                try:
-                    logger.debug(f"正在获取 TMDB 人物详情: {person_tmdbid} ...")
-                    person_detail = TmdbChain().person_detail(int(person_tmdbid))
-                    if person_detail:
-                        # 图片
-                        _path = person_detail.profile_path
-                        if _path:
-                            tmdb_img = f"https://{settings.TMDB_IMAGE_DOMAIN}/t/p/original{_path}"
-                        
-                        # 姓名
-                        if person_detail.name:
-                            if StringUtils.is_chinese(person_detail.name):
-                                tmdb_name_cn = person_detail.name
-                            else:
-                                tmdb_name_en = person_detail.name
-
-                        # 简介
-                        if person_detail.biography:
-                            if StringUtils.is_chinese(person_detail.biography):
-                                tmdb_overview_cn = person_detail.biography
-                            else:
-                                tmdb_overview_en = person_detail.biography
-                        
-                        logger.debug(f"TMDB获取结果: 中文名={tmdb_name_cn}, 英文名={tmdb_name_en}, 简介长度={len(person_detail.biography) if person_detail.biography else 0}")
-                except Exception as e:
-                    logger.warn(f"TMDB获取人物详情失败: {e}")
+                # 升级：直接通过 API 获取更全的信息（含外部链接、图片）
+                tmdb_details, tmdb_ext_ids = self.__get_tmdb_extra_info(person_tmdbid)
+                
+                if tmdb_details:
+                    # 获取外部链接
+                    tmdb_external_ids = tmdb_ext_ids or {}
+                    
+                    # 获取图片 (优先使用 original)
+                    _path = tmdb_details.get("profile_path")
+                    if _path:
+                        tmdb_img = f"https://{settings.TMDB_IMAGE_DOMAIN}/t/p/original{_path}"
+                    
+                    # 获取姓名
+                    _name = tmdb_details.get("name")
+                    if _name:
+                        if StringUtils.is_chinese(_name): tmdb_name_cn = _name
+                        else: tmdb_name_en = _name
+                    
+                    # 获取简介
+                    _bio = tmdb_details.get("biography")
+                    if _bio:
+                        if StringUtils.is_chinese(_bio): tmdb_overview_cn = _bio
+                        else: tmdb_overview_en = _bio
+                    
+                else:
+                    # 降级：如果直接 API 失败，尝试旧的 Chain 方法
+                    try:
+                        person_detail = TmdbChain().person_detail(int(person_tmdbid))
+                        if person_detail:
+                            if person_detail.profile_path:
+                                tmdb_img = f"https://{settings.TMDB_IMAGE_DOMAIN}/t/p/original{person_detail.profile_path}"
+                            if person_detail.name:
+                                if StringUtils.is_chinese(person_detail.name): tmdb_name_cn = person_detail.name
+                                else: tmdb_name_en = person_detail.name
+                            if person_detail.biography:
+                                if StringUtils.is_chinese(person_detail.biography): tmdb_overview_cn = person_detail.biography
+                                else: tmdb_overview_en = person_detail.biography
+                    except Exception as e:
+                        logger.warn(f"TMDB Chain获取失败: {e}")
+            else:
+                logger.debug(f"人物 {original_name} 缺失 TMDB ID，无法获取 TMDB 数据/图片")
 
             # --- 准备 豆瓣 数据 ---
             douban_match = None
@@ -610,7 +652,7 @@ class personmetamod(_PluginBase):
                     
                     if is_match:
                         douban_match = douban_actor
-                        logger.info(f"豆瓣匹配成功: {current_name} => {douban_match.get('name')}")
+                        # logger.info(f"豆瓣匹配成功: {current_name} => {douban_match.get('name')}")
                         break
 
             # --- 决策逻辑 ---
@@ -622,35 +664,28 @@ class personmetamod(_PluginBase):
             
             if is_douban_zh:
                 final_name = douban_name
-                logger.debug(f"姓名策略: 使用豆瓣中文名 [{final_name}]")
             elif tmdb_name_cn:
                 final_name = tmdb_name_cn
-                logger.debug(f"姓名策略: 使用 TMDB 中文名 [{final_name}]")
             elif tmdb_name_en:
                 final_name = tmdb_name_en
-                logger.debug(f"姓名策略: 使用 TMDB 英文名 [{final_name}]")
             
             # 繁转简
             if final_name:
                 final_name_sc = __to_zh_cn(final_name)
                 if final_name_sc != final_name:
-                    logger.debug(f"姓名繁转简: {final_name} -> {final_name_sc}")
                     final_name = final_name_sc
 
             # 2. 【简介 (Overview)】
             # 优先级：TMDB中文 > TMDB英文 > 豆瓣
             if tmdb_overview_cn:
                 final_overview = tmdb_overview_cn
-                logger.debug(f"简介策略: 使用 TMDB 中文简介")
             elif tmdb_overview_en:
                 final_overview = tmdb_overview_en
-                logger.debug(f"简介策略: 使用 TMDB 英文简介")
             elif douban_match:
                 # 尝试获取豆瓣简介
                 raw_intro = douban_match.get("summary") or douban_match.get("intro") or douban_match.get("biography")
                 if raw_intro:
                      final_overview = raw_intro
-                     logger.debug(f"简介策略: 使用 豆瓣 简介")
 
             # 繁转简
             if final_overview:
@@ -668,7 +703,7 @@ class personmetamod(_PluginBase):
                     final_img = avatar
                     img_source = "Douban"
             
-            # 豆瓣没图，用 TMDB
+            # 兜底：豆瓣没图，用 TMDB
             if not final_img and tmdb_img:
                 final_img = tmdb_img
                 img_source = "TMDB"
@@ -680,11 +715,38 @@ class personmetamod(_PluginBase):
                 character = re.sub(r"饰\s*|演员\s*", "", douban_match.get("character")).strip()
                 if character:
                     final_role = __to_zh_cn(character)
-                    logger.debug(f"角色信息: 从豆瓣获取 [{final_role}]")
 
             # --- 执行更新判断 ---
 
-            # A. 全局信息更新 (Name, Overview)
+            # A. 外部 ID 更新 (ProviderIds)
+            # 映射表: TMDB API Key -> Emby Provider Key
+            id_mapping = {
+                "imdb_id": "Imdb",
+                "facebook_id": "Facebook",
+                "instagram_id": "Instagram",
+                "twitter_id": "Twitter",
+                "wikidata_id": "Wikidata",
+                "tvrage_id": "TvRage"
+            }
+            
+            current_pids = personinfo.get("ProviderIds", {})
+            pids_updated = False
+            
+            for tmdb_k, emby_k in id_mapping.items():
+                val = tmdb_external_ids.get(tmdb_k)
+                if val:
+                    # 只有当 Emby 里没有这个值，或者值不一样时才更新
+                    # 注意全部转字符串比较
+                    if str(val) != str(current_pids.get(emby_k, "")):
+                        current_pids[emby_k] = str(val)
+                        pids_updated = True
+                        logger.debug(f"新增/更新社交ID: {emby_k} = {val}")
+
+            if pids_updated:
+                personinfo["ProviderIds"] = current_pids
+                updated_global = True
+
+            # B. 全局信息更新 (Name, Overview)
             if final_name and final_name != personinfo.get("Name"):
                 logger.info(f"更新人物姓名: {personinfo.get('Name')} -> {final_name}")
                 personinfo["Name"] = final_name
@@ -695,19 +757,20 @@ class personmetamod(_PluginBase):
                 personinfo["Overview"] = final_overview
                 updated_global = True
 
-            # B. 媒体项角色更新 (Role)
+            # C. 媒体项角色更新 (Role)
             if final_role:
                 ret_people["Role"] = final_role
                 if final_name: ret_people["Name"] = final_name
             
-            # C. 图片更新
+            # D. 图片更新
             if final_img:
+                # 只有当确定有图时才更新。为了修复“头像为空”的问题，这里不再判断原先是否有图，直接覆盖/写入
                 logger.info(f"正在更新图片 ({img_source}): {final_name}")
                 if not self.set_item_image(server=server, server_type=server_type, 
                                     itemid=people.get("Id"), imageurl=final_img):
                     logger.warn(f"图片下载/更新失败: {final_img}")
 
-            # D. 锁定逻辑 (仅当配置开关开启时才执行)
+            # E. 锁定逻辑 (仅当配置开关开启时才执行)
             if self._lock_info and updated_global:
                 if "LockedFields" not in personinfo: 
                     personinfo["LockedFields"] = []
@@ -749,7 +812,7 @@ class personmetamod(_PluginBase):
                                                  season=season)
         if doubaninfo:
             doubanitem = self.chain.douban_info(doubaninfo.get("id")) or {}
-            logger.info(f"获取豆瓣条目成功: {mediainfo.title_year} (ID: {doubaninfo.get('id')})")
+            # logger.info(f"获取豆瓣条目成功: {mediainfo.title_year} (ID: {doubaninfo.get('id')})")
             return (doubanitem.get("actors") or []) + (doubanitem.get("directors") or [])
         else:
             logger.debug(f"未找到豆瓣信息：{mediainfo.title_year}")
@@ -761,10 +824,10 @@ class personmetamod(_PluginBase):
 
         def __get_emby_iteminfo() -> dict:
             try:
-                # Emby/Jellyfin 通用
-                url = f'[HOST]emby/Users/[USER]/Items/{itemid}?Fields=ChannelMappingInfo&api_key=[APIKEY]'
+                # Emby/Jellyfin 通用，请求ProviderIds以便同步
+                url = f'[HOST]emby/Users/[USER]/Items/{itemid}?Fields=ChannelMappingInfo,ProviderIds&api_key=[APIKEY]'
                 if server_type == 'jellyfin':
-                    url = f'[HOST]Users/[USER]/Items/{itemid}?Fields=ChannelMappingInfo&api_key=[APIKEY]'
+                    url = f'[HOST]Users/[USER]/Items/{itemid}?Fields=ChannelMappingInfo,ProviderIds&api_key=[APIKEY]'
                     
                 res = service.instance.get_data(url=url)
                 if res: 
