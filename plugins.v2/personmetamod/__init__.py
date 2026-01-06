@@ -30,21 +30,21 @@ from app.utils.http import RequestUtils
 from app.utils.string import StringUtils
 
 
-class personmetamod(_PluginBase):
+class PersonMetaMod(_PluginBase):
     # 插件名称
-    plugin_name = "演职人员刮削"
+    plugin_name = "演职人员刮削-Mod"
     # 插件描述
-    plugin_desc = "刮削演职人员图片以及中文名称。"
+    plugin_desc = "刮削演职人员图片以及中文名称（Mod: 仅匹配TMDB Name/原名，绝对不匹配别名）。"
     # 插件图标
     plugin_icon = "actor.png"
     # 插件版本
     plugin_version = "2.2.3"
     # 插件作者
-    plugin_author = "jxxghp"
+    plugin_author = "ntf8wo"
     # 作者主页
-    author_url = "https://github.com/jxxghp"
+    author_url = ""
     # 插件配置项ID前缀
-    plugin_config_prefix = "personmeta_"
+    plugin_config_prefix = "personmeta_mod_"
     # 加载顺序
     plugin_order = 24
     # 可使用的用户级别
@@ -84,7 +84,7 @@ class personmetamod(_PluginBase):
                                     run_date=datetime.datetime.now(
                                         tz=pytz.timezone(settings.TZ)) + datetime.timedelta(seconds=3)
                                     )
-            logger.info(f"演职人员刮削服务启动，立即运行一次")
+            logger.info(f"演职人员刮削服务(Mod)启动，立即运行一次")
             # 关闭一次性开关
             self._onlyonce = False
             # 保存配置
@@ -121,18 +121,11 @@ class personmetamod(_PluginBase):
     def get_service(self) -> List[Dict[str, Any]]:
         """
         注册插件公共服务
-        [{
-            "id": "服务ID",
-            "name": "服务名称",
-            "trigger": "触发器：cron/interval/date/CronTrigger.from_crontab()",
-            "func": self.xxx,
-            "kwargs": {} # 定时器参数
-        }]
         """
         if self._enabled and self._cron:
             return [{
-                "id": "personmetamod",
-                "name": "演职人员刮削服务",
+                "id": "PersonMetaMod",
+                "name": "演职人员刮削服务(Mod)",
                 "trigger": CronTrigger.from_crontab(self._cron),
                 "func": self.scrap_library,
                 "kwargs": {}
@@ -140,7 +133,7 @@ class personmetamod(_PluginBase):
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """
-        拼装插件配置页面，需要返回两块数据：1、页面配置；2、数据结构
+        拼装插件配置页面
         """
         return [
             {
@@ -584,12 +577,15 @@ class personmetamod(_PluginBase):
                     if profile_path:
                         logger.debug(f"{people.get('Name')} 从TMDB获取到图片：{profile_path}")
                         profile_path = f"https://{settings.TMDB_IMAGE_DOMAIN}/t/p/original{profile_path}"
-                    if cn_name:
-                        # 更新中文名
+                    
+                    # 只有当名字存在且与当前名字不一致时才更新
+                    if cn_name and cn_name != personinfo.get("Name"):
+                        # 更新中文名 (或TMDB返回的原名)
                         logger.debug(f"{people.get('Name')} 从TMDB获取到名字：{cn_name}")
                         personinfo["Name"] = cn_name
                         ret_people["Name"] = cn_name
                         updated_name = True
+                        
                         # 更新中文描述
                         biography = person_detail.biography
                         if biography and StringUtils.is_chinese(biography):
@@ -598,29 +594,6 @@ class personmetamod(_PluginBase):
                             updated_overview = True
 
             # 从豆瓣信息中更新人物信息
-            """
-            {
-              "name": "丹尼尔·克雷格",
-              "roles": [
-                "演员",
-                "制片人",
-                "配音"
-              ],
-              "title": "丹尼尔·克雷格（同名）英国,英格兰,柴郡,切斯特影视演员",
-              "url": "https://movie.douban.com/celebrity/1025175/",
-              "user": null,
-              "character": "饰 詹姆斯·邦德 James Bond 007",
-              "uri": "douban://douban.com/celebrity/1025175?subject_id=27230907",
-              "avatar": {
-                "large": "https://qnmob3.doubanio.com/view/celebrity/raw/public/p42588.jpg?imageView2/2/q/80/w/600/h/3000/format/webp",
-                "normal": "https://qnmob3.doubanio.com/view/celebrity/raw/public/p42588.jpg?imageView2/2/q/80/w/200/h/300/format/webp"
-              },
-              "sharing_url": "https://www.douban.com/doubanapp/dispatch?uri=/celebrity/1025175/",
-              "type": "celebrity",
-              "id": "1025175",
-              "latin_name": "Daniel Craig"
-            }
-            """
             if douban_actors and (not updated_name
                                   or not updated_overview
                                   or not update_character):
@@ -685,7 +658,7 @@ class personmetamod(_PluginBase):
                 if ret:
                     return ret_people
             else:
-                logger.debug(f"人物 {people.get('Name')} 未找到中文数据")
+                logger.debug(f"人物 {people.get('Name')} 无需更新或未找到数据")
         except Exception as err:
             logger.error(f"更新人物信息失败：{str(err)}")
         return None
@@ -1085,13 +1058,16 @@ class personmetamod(_PluginBase):
     @staticmethod
     def __get_chinese_name(personinfo: schemas.MediaPerson) -> str:
         """
-        获取TMDB名字
-        逻辑：优先使用 TMDB 返回的 name (可能是中文或英文)，绝不使用别名
+        获取TMDB名称 (Mod: 仅获取Name，忽略别名)
         """
         try:
-            if personinfo.name:
-                # 无论是中文还是英文，都尝试转繁简（英文不受影响），直接返回 Name 字段
-                return zhconv.convert(personinfo.name, "zh-hans")
+            name = personinfo.name
+            if name:
+                # 如果包含中文，强制转简中
+                if StringUtils.is_chinese(name):
+                    return zhconv.convert(name, "zh-hans")
+                # 否则直接返回原名
+                return name
         except Exception as err:
             logger.error(f"获取人物名字失败：{err}")
         return ""
