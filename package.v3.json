@@ -1,0 +1,15 @@
+{
+  "personmetamod": {
+    "name": "演职人员刮削-Mod",
+    "description": "刮削演职人员详细元数据（姓名/角色仅限TMDB，简介/图片TMDB优先豆瓣兜底）。支持Emby出生/逝世/外部ID等字段。",
+    "labels": "刮削,演职人员",
+    "version": "1.0",
+    "icon": "actor.png",
+    "author": "ntf8wo",
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "history": {
+      "v1.0": "适配 MoviePilot v3（app.sdk 接口与 media_source 识别）；TMDB 为主豆瓣兜底；修复误删风险，优化缓存与豆瓣懒加载。"
+    }
+  }
+}
