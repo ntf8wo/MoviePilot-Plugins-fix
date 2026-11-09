@@ -2,12 +2,12 @@ import base64
 import copy
 import datetime
 import json
-import re
+import random
 import threading
 import time
+import traceback
 from pathlib import Path
 from typing import Any, List, Dict, Tuple, Optional
-from urllib.parse import quote
 
 import pytz
 import zhconv
@@ -15,9 +15,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from requests import RequestException
 
-from app import schemas
 from app.chain.mediaserver import MediaServerChain
-from app.chain.tmdb import TmdbChain
 from app.core.config import settings
 from app.core.event import eventmanager, Event
 from app.core.meta import MetaBase
@@ -39,7 +37,7 @@ class personmetamod(_PluginBase):
     # 插件图标
     plugin_icon = "actor.png"
     # 插件版本
-    plugin_version = "3.0.0"
+    plugin_version = "1.0"
     # 插件作者
     plugin_author = "ntf8wo"
     # 作者主页
@@ -62,7 +60,12 @@ class personmetamod(_PluginBase):
     _delay = 0
     _type = "all"
     _remove_nozh = False
+    _force_image = False
     _mediaservers = []
+
+    # 运行期缓存：TMDB人物详情 / 媒体项详情（键：tmdbid、server_itemid）
+    _tmdb_person_cache = {}
+    _iteminfo_cache = {}
 
     def init_plugin(self, config: dict = None):
 
@@ -73,6 +76,7 @@ class personmetamod(_PluginBase):
             self._type = config.get("type") or "all"
             self._delay = config.get("delay") or 0
             self._remove_nozh = config.get("remove_nozh") or False
+            self._force_image = config.get("force_image") or False
             self._mediaservers = config.get("mediaservers") or []
 
         # 停止现有任务
@@ -106,6 +110,7 @@ class personmetamod(_PluginBase):
             "type": self._type,
             "delay": self._delay,
             "remove_nozh": self._remove_nozh,
+            "force_image": self._force_image,
             "mediaservers": self._mediaservers
         })
 
@@ -280,6 +285,22 @@ class personmetamod(_PluginBase):
                                         }
                                     }
                                 ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'force_image',
+                                            'label': '强制更新头像',
+                                        }
+                                    }
+                                ]
                             }
                         ]
                     }
@@ -291,7 +312,9 @@ class personmetamod(_PluginBase):
             "cron": "",
             "type": "all",
             "delay": 30,
-            "remove_nozh": False
+            "remove_nozh": False,
+            "force_image": False,
+            "mediaservers": []
         }
 
     def get_page(self) -> List[dict]:
@@ -332,7 +355,7 @@ class personmetamod(_PluginBase):
             return
         # 事件数据
         if not event or not event.event_data:
-            logger.warn("TransferComplete事件数据为空")
+            logger.warning("TransferComplete事件数据为空")
             return
         mediainfo: MediaInfo = event.event_data.get("mediainfo")
         meta: MetaBase = event.event_data.get("meta")
@@ -344,12 +367,12 @@ class personmetamod(_PluginBase):
         # 查询媒体服务器中的条目
         existsinfo = self.chain.media_exists(mediainfo=mediainfo)
         if not existsinfo or not existsinfo.itemid:
-            logger.warn(f"{mediainfo.title_year} 在媒体库中不存在")
+            logger.warning(f"{mediainfo.title_year} 在媒体库中不存在")
             return
         # 查询条目详情
         iteminfo = MediaServerChain().iteminfo(server=existsinfo.server, item_id=existsinfo.itemid)
         if not iteminfo:
-            logger.warn(f"{mediainfo.title_year} 条目详情获取失败")
+            logger.warning(f"{mediainfo.title_year} 条目详情获取失败")
             return
         # 刮削演职人员信息
         self.__update_item(server=existsinfo.server, server_type=existsinfo.server_type,
@@ -388,7 +411,7 @@ class personmetamod(_PluginBase):
             logger.info(f"服务器 {server} 的演员信息刮削完成")
 
     def __update_peoples(self, server: str, server_type: str,
-                         itemid: str, iteminfo: dict, douban_actors):
+                         itemid: str, iteminfo: dict, get_douban_actors):
         # 处理媒体项中的人物信息
         """
         "People": [
@@ -410,34 +433,30 @@ class personmetamod(_PluginBase):
                 logger.info(f"演职人员刮削服务停止")
                 return
             
-            # 仅仅跳过无名字的
+            # 无名字的人物原样保留，避免保存时被意外丢弃
             if not people.get("Name"):
+                peoples.append(people)
                 continue
 
-            # 调用核心更新逻辑
-            info = self.__update_people(server=server, server_type=server_type,
-                                        people=people, douban_actors=douban_actors)
-            
-            if info:
-                # 只有返回了新的信息才加入列表（或者被修改了）
-                # 注意：__update_people 内部如果发现名字变了，返回的是新的 info
-                # 如果仅仅是更新了人物的元数据（简介/生日等），info也会返回
-                peoples.append(info)
-                is_modified = True
-            elif not self._remove_nozh:
-                # 没更新但也没被删除
-                peoples.append(people)
-            else:
-                # 被删除了（info为None 且 remove_nozh=True）
-                is_modified = True
-                logger.info(f"人物 {people.get('Name')} 因非中文且开启了删除选项，已被移除")
+            # 调用核心更新逻辑：始终返回保留的人物信息及是否有变更
+            info, changed = self.__update_people(server=server, server_type=server_type,
+                                                 people=people, get_douban_actors=get_douban_actors)
 
-        # 保存媒体项信息（如果列表有变化）
-        if is_modified and peoples:
+            # 删除非中文演员：基于最终姓名判断，更新失败/异常不会被误删
+            if self._remove_nozh and info.get("Name") and not StringUtils.is_chinese(info.get("Name")):
+                is_modified = True
+                logger.info(f"人物 {info.get('Name')} 名字非中文，已被移除")
+                continue
+
+            peoples.append(info)
+            if changed:
+                is_modified = True
+
+        # 保存媒体项信息（只要有变化就提交，包括全部演员被删除、列表为空的情况）
+        if is_modified:
             iteminfo["People"] = peoples
-            # 这里是更新 Movie/Series 这一层的 People 列表
-            # 实际上 __update_people 内部已经更新了 Person 这个实体
-            # 但为了确保 Movie 界面显示的列表也是最新的，这里也提交一次
+            # __update_people 内部已经更新了 Person 实体本身
+            # 这里同步 Movie/Series 这一层的 People 列表，确保界面显示最新
             logger.info(f"正在更新媒体条目 {iteminfo.get('Name')} 的演职员列表...")
             self.set_iteminfo(server=server, server_type=server_type,
                               itemid=itemid, iteminfo=iteminfo)
@@ -471,26 +490,26 @@ class personmetamod(_PluginBase):
         # 识别媒体信息
         if not mediainfo:
             if not item.tmdbid:
-                logger.warn(f"{item.title} 未找到tmdbid，无法识别媒体信息")
+                logger.warning(f"{item.title} 未找到tmdbid，无法识别媒体信息")
                 return
             mtype = MediaType.TV if item.item_type in ['Series', 'show'] else MediaType.MOVIE
             mediainfo = self.chain.recognize_media(mtype=mtype, tmdbid=item.tmdbid)
             if not mediainfo:
-                logger.warn(f"{item.title} 未识别到媒体信息")
+                logger.warning(f"{item.title} 未识别到媒体信息")
                 return
 
         # 获取媒体项
         iteminfo = self.get_iteminfo(server=server, server_type=server_type, itemid=item.item_id)
         if not iteminfo:
-            logger.warn(f"{item.title} 未找到媒体项")
+            logger.warning(f"{item.title} 未找到媒体项")
             return
 
         if __need_trans_actor(iteminfo):
-            # 获取豆瓣演员信息 (仅作为简介/图片的兜底)
+            # 豆瓣数据懒加载：仅作为简介/图片的兜底，真正用到时才请求
             logger.info(f"开始检查 {item.title} 的演职员信息 ...")
-            douban_actors = self.__get_douban_actors(mediainfo=mediainfo, season=season)
+            get_douban_actors = self.__make_douban_getter(mediainfo=mediainfo, season=season)
             self.__update_peoples(server=server, server_type=server_type,
-                                  itemid=item.item_id, iteminfo=iteminfo, douban_actors=douban_actors)
+                                  itemid=item.item_id, iteminfo=iteminfo, get_douban_actors=get_douban_actors)
         else:
             logger.info(f"{item.title} 无需更新")
 
@@ -500,30 +519,31 @@ class personmetamod(_PluginBase):
             seasons = self.get_items(server=server, server_type=server_type,
                                      parentid=item.item_id, mtype="Season")
             if not seasons:
-                logger.warn(f"{item.title} 未找到季媒体项")
+                logger.warning(f"{item.title} 未找到季媒体项")
                 return
-            for season in seasons.get("Items", []):
-                # 获取豆瓣演员信息
-                season_actors = self.__get_douban_actors(mediainfo=mediainfo, season=season.get("IndexNumber"))
+            for season_item in seasons.get("Items", []):
+                # 获取豆瓣演员信息（懒加载，仅在需要兜底时才真正请求）
+                season_actors_getter = self.__make_douban_getter(mediainfo=mediainfo,
+                                                                 season=season_item.get("IndexNumber"))
                 # 如果是Jellyfin，更新季的人物，Emby/Plex季没有人物
                 if server_type == "jellyfin":
                     seasoninfo = self.get_iteminfo(server=server, server_type=server_type,
-                                                   itemid=season.get("Id"))
+                                                   itemid=season_item.get("Id"))
                     if not seasoninfo:
-                        logger.warn(f"{item.title} 未找到季媒体项：{season.get('Id')}")
+                        logger.warning(f"{item.title} 未找到季媒体项：{season_item.get('Id')}")
                         continue
 
                     if __need_trans_actor(seasoninfo):
                         # 更新季媒体项人物
                         self.__update_peoples(server=server, server_type=server_type,
-                                              itemid=season.get("Id"), iteminfo=seasoninfo,
-                                              douban_actors=season_actors)
+                                              itemid=season_item.get("Id"), iteminfo=seasoninfo,
+                                              get_douban_actors=season_actors_getter)
                         logger.info(f"季 {seasoninfo.get('Id')} 的人物信息更新完成")
                 # 获取集媒体项
                 episodes = self.get_items(server=server, server_type=server_type,
-                                          parentid=season.get("Id"), mtype="Episode")
+                                          parentid=season_item.get("Id"), mtype="Episode")
                 if not episodes:
-                    logger.warn(f"{item.title} 未找到集媒体项")
+                    logger.warning(f"{item.title} 未找到集媒体项")
                     continue
                 # 更新集媒体项人物
                 for episode in episodes.get("Items", []):
@@ -531,14 +551,28 @@ class personmetamod(_PluginBase):
                     episodeinfo = self.get_iteminfo(server=server, server_type=server_type,
                                                     itemid=episode.get("Id"))
                     if not episodeinfo:
-                        logger.warn(f"{item.title} 未找到集媒体项：{episode.get('Id')}")
+                        logger.warning(f"{item.title} 未找到集媒体项：{episode.get('Id')}")
                         continue
                     if __need_trans_actor(episodeinfo):
-                        # 更新集媒体项人物
+                        # 更新集媒体项人物（豆瓣兜底沿用季的数据）
                         self.__update_peoples(server=server, server_type=server_type,
                                               itemid=episode.get("Id"), iteminfo=episodeinfo,
-                                              douban_actors=season_actors)
+                                              get_douban_actors=season_actors_getter)
                         logger.info(f"集 {episodeinfo.get('Id')} 的人物信息更新完成")
+
+    def __make_douban_getter(self, mediainfo: MediaInfo, season: int = None):
+        """
+        生成豆瓣演员的懒加载获取器：
+        仅在TMDB数据不足、真正需要兜底时才请求豆瓣，并缓存本次结果
+        """
+        state = {"actors": None}
+
+        def getter() -> List[dict]:
+            if state["actors"] is None:
+                state["actors"] = self.__get_douban_actors(mediainfo=mediainfo, season=season)
+            return state["actors"]
+
+        return getter
 
     def __get_tmdb_person_full(self, person_id: int) -> Optional[dict]:
         """
@@ -547,6 +581,11 @@ class personmetamod(_PluginBase):
         if not settings.TMDB_API_KEY:
             logger.error("未配置TMDB API KEY")
             return None
+
+        # 运行期内缓存，避免同一个人物在多个条目中被重复请求
+        cache_key = str(person_id)
+        if cache_key in self._tmdb_person_cache:
+            return self._tmdb_person_cache[cache_key]
             
         url = f"https://api.themoviedb.org/3/person/{person_id}"
         params = {
@@ -562,6 +601,9 @@ class personmetamod(_PluginBase):
                 data = res.json()
                 logger.info(f"TMDB人物详情请求成功: ID={person_id}")
                 logger.debug(f"TMDB返回数据: {json.dumps(data, ensure_ascii=False)}")
+                self._tmdb_person_cache[cache_key] = data
+                if len(self._tmdb_person_cache) > 2000:
+                    self._tmdb_person_cache.clear()
                 return data
             else:
                 logger.error(f"TMDB人物详情请求失败: ID={person_id}, Code={res.status_code if res else 'Unknown'}, Msg={res.text if res else ''}")
@@ -570,9 +612,11 @@ class personmetamod(_PluginBase):
         return None
 
     def __update_people(self, server: str, server_type: str,
-                        people: dict, douban_actors: list = None) -> Optional[dict]:
+                        people: dict, get_douban_actors=None) -> Tuple[dict, bool]:
         """
-        更新人物信息，返回替换后的人物信息
+        更新人物信息
+        :return: (最终保留的人物信息, 是否有变更)
+                 更新失败/异常时原样返回原人物且变更=False，绝不当作删除
         """
 
         def __get_peopleid(p: dict) -> Tuple[Optional[str], Optional[str]]:
@@ -595,6 +639,7 @@ class personmetamod(_PluginBase):
         
         # 记录是否需要更新
         needs_update = False
+        image_changed = False
         update_fields = []
 
         try:
@@ -604,8 +649,8 @@ class personmetamod(_PluginBase):
             personinfo = self.get_iteminfo(server=server, server_type=server_type,
                                            itemid=people.get("Id"))
             if not personinfo:
-                logger.warn(f"未找到人物 {people.get('Name')} 的媒体库详情，跳过")
-                return None
+                logger.warning(f"未找到人物 {people.get('Name')} 的媒体库详情，跳过")
+                return people, False
             
             # 初始化 ProviderIds
             if "ProviderIds" not in personinfo:
@@ -614,14 +659,14 @@ class personmetamod(_PluginBase):
             # 2. 获取 TMDB ID
             person_tmdbid, person_imdbid = __get_peopleid(personinfo)
             if not person_tmdbid:
-                logger.warn(f"人物 {people.get('Name')} 缺少 TMDB ID，无法获取TMDB数据")
-                return people # 原样返回
+                logger.warning(f"人物 {people.get('Name')} 缺少 TMDB ID，无法获取TMDB数据")
+                return people, False # 原样保留
 
             # 3. 从 TMDB 获取全量数据 (API请求)
             tmdb_data = self.__get_tmdb_person_full(int(person_tmdbid))
             if not tmdb_data:
-                logger.warn(f"无法获取 TMDB 数据: {people.get('Name')}")
-                return people
+                logger.warning(f"无法获取 TMDB 数据: {people.get('Name')}")
+                return people, False
 
             # 4. 解析 TMDB 数据并准备更新字段
             
@@ -652,10 +697,10 @@ class personmetamod(_PluginBase):
                 new_overview = zhconv.convert(tmdb_bio, "zh-hans") if StringUtils.is_chinese(tmdb_bio) else tmdb_bio
                 overview_source = "TMDB"
             
-            # 如果TMDB简介为空，尝试查找豆瓣
-            if not new_overview and douban_actors:
+            # 如果TMDB简介为空，尝试查找豆瓣（懒加载触发）
+            if not new_overview and get_douban_actors:
                 logger.info("TMDB简介为空，尝试搜索豆瓣数据...")
-                for db_actor in douban_actors:
+                for db_actor in get_douban_actors():
                     # 尝试匹配名字
                     if (db_actor.get("latin_name") and db_actor.get("latin_name") == tmdb_name) \
                             or (db_actor.get("name") and db_actor.get("name") == tmdb_name) \
@@ -688,7 +733,7 @@ class personmetamod(_PluginBase):
                         needs_update = True
                         update_fields.append("PremiereDate")
                 except Exception as e:
-                    logger.warn(f"日期解析失败: {tmdb_birth}, Error: {e}")
+                    logger.warning(f"日期解析失败: {tmdb_birth}, Error: {e}")
 
             # 逝世日期 (DeathDate / EndDate)
             tmdb_death = tmdb_data.get("deathday")
@@ -746,31 +791,36 @@ class personmetamod(_PluginBase):
                     personinfo["LockedFields"].append(field)
                     # 锁定字段通常不需要视为数据变更，但为了保险起见，如果改变了锁定状态也提交
             
-            # 5. 处理图片 (Profile)
+            # 5. 处理图片 (Profile)：默认仅在头像缺失时更新，避免每次运行重复下载上传
             profile_path = None
             image_source = "None"
-            
-            # 优先 TMDB
-            if tmdb_data.get("profile_path"):
-                profile_path = f"https://{settings.TMDB_IMAGE_DOMAIN}/t/p/original{tmdb_data.get('profile_path')}"
-                image_source = "TMDB"
-            
-            # 其次 豆瓣
-            if not profile_path and douban_actors:
-                for db_actor in douban_actors:
-                     if (db_actor.get("latin_name") and db_actor.get("latin_name") == tmdb_name) \
-                            or (db_actor.get("name") and db_actor.get("name") == tmdb_name):
-                         avatar = db_actor.get("avatar") or {}
-                         if avatar.get("large"):
-                             profile_path = avatar.get("large")
-                             image_source = "Douban"
-                             break
-            
-            # 提交图片更新
-            if profile_path:
-                logger.info(f"正在更新图片 (来源: {image_source}): {profile_path}")
-                self.set_item_image(server=server, server_type=server_type, 
-                                    itemid=people.get("Id"), imageurl=profile_path)
+            has_image = bool((personinfo.get("ImageTags") or {}).get("Primary"))
+
+            if self._force_image or not has_image:
+                # 优先 TMDB
+                if tmdb_data.get("profile_path"):
+                    profile_path = f"https://{settings.TMDB_IMAGE_DOMAIN}/t/p/original{tmdb_data.get('profile_path')}"
+                    image_source = "TMDB"
+
+                # 其次 豆瓣
+                if not profile_path and get_douban_actors:
+                    for db_actor in get_douban_actors():
+                        if (db_actor.get("latin_name") and db_actor.get("latin_name") == tmdb_name) \
+                                or (db_actor.get("name") and db_actor.get("name") == tmdb_name):
+                            avatar = db_actor.get("avatar") or {}
+                            if avatar.get("large"):
+                                profile_path = avatar.get("large")
+                                image_source = "Douban"
+                                break
+
+                # 提交图片更新
+                if profile_path:
+                    logger.info(f"正在更新图片 (来源: {image_source}): {profile_path}")
+                    if self.set_item_image(server=server, server_type=server_type,
+                                           itemid=people.get("Id"), imageurl=profile_path):
+                        image_changed = True
+            else:
+                logger.info(f"人物 {tmdb_name} 已有头像，跳过图片更新")
 
             # 6. 提交元数据更新
             if needs_update:
@@ -781,26 +831,28 @@ class personmetamod(_PluginBase):
                                         itemid=people.get("Id"), iteminfo=personinfo)
                 if ret:
                     logger.info(f"人物 {tmdb_name} 更新成功!")
-                    return ret_people
+                    return ret_people, True
                 else:
                     logger.error(f"人物 {tmdb_name} 更新失败!")
+                    return people, False
             else:
                 logger.info(f"人物 {tmdb_name} 无需更新元数据")
 
         except Exception as err:
             logger.error(f"更新人物信息发生未捕获异常: {str(err)}")
-            import traceback
             logger.error(traceback.format_exc())
-        
-        return None
+            return people, False
+
+        # 无元数据变更：仅当图片确实更新时才需要刷新列表显示
+        return ret_people, image_changed
 
     def __get_douban_actors(self, mediainfo: MediaInfo, season: int = None) -> List[dict]:
         """
         获取豆瓣演员信息
         """
-        # 随机休眠 3-10 秒
-        sleep_time = 3 + int(time.time()) % 7
-        logger.info(f"为防止触发反爬，随机休眠 {sleep_time}秒 ...")
+        # 随机休眠 3-9 秒，防止触发豆瓣反爬
+        sleep_time = random.randint(3, 9)
+        logger.info(f"为防止触发反爬，休眠 {sleep_time}秒 ...")
         time.sleep(sleep_time)
         # 匹配豆瓣信息
         doubaninfo = self.chain.match_doubaninfo(name=mediainfo.title,
@@ -816,17 +868,20 @@ class personmetamod(_PluginBase):
             logger.info(f"获取到豆瓣演职人员共 {len(actors)} 人")
             return actors
         else:
-            logger.warn(f"未找到豆瓣信息：{mediainfo.title_year}")
+            logger.warning(f"未找到豆瓣信息：{mediainfo.title_year}")
         return []
 
     def get_iteminfo(self, server: str, server_type: str, itemid: str) -> dict:
         """
-        获得媒体项详情
+        获得媒体项详情（运行期内缓存，写入后自动失效）
         """
+        cache_key = f"{server}_{itemid}"
+        if cache_key in self._iteminfo_cache:
+            return self._iteminfo_cache[cache_key]
 
         service = self.service_infos(server_type).get(server)
         if not service:
-            logger.warn(f"未找到媒体服务器 {server} 的实例")
+            logger.warning(f"未找到媒体服务器 {server} 的实例")
             return {}
 
         def __get_emby_iteminfo() -> dict:
@@ -878,6 +933,8 @@ class personmetamod(_PluginBase):
                 iteminfo['Name'] = plexitem.title
                 iteminfo['Id'] = plexitem.key
                 iteminfo['ProductionYear'] = plexitem.year
+                if plexitem.thumb:
+                    iteminfo['ImageTags'] = {'Primary': plexitem.thumb}
                 iteminfo['ProviderIds'] = {}
                 for guid in plexitem.guids:
                     idlist = str(guid.id).split(sep='://')
@@ -895,11 +952,17 @@ class personmetamod(_PluginBase):
             return {}
 
         if server_type == "emby":
-            return __get_emby_iteminfo()
+            iteminfo = __get_emby_iteminfo()
         elif server_type == "jellyfin":
-            return __get_jellyfin_iteminfo()
+            iteminfo = __get_jellyfin_iteminfo()
         else:
-            return __get_plex_iteminfo()
+            iteminfo = __get_plex_iteminfo()
+
+        if iteminfo:
+            self._iteminfo_cache[cache_key] = iteminfo
+            if len(self._iteminfo_cache) > 2000:
+                self._iteminfo_cache.clear()
+        return iteminfo
 
     def get_items(self, server: str, server_type: str, parentid: str, mtype: str = None) -> dict:
         """
@@ -907,7 +970,7 @@ class personmetamod(_PluginBase):
         """
         service = self.service_infos(server_type).get(server)
         if not service:
-            logger.warn(f"未找到媒体服务器 {server} 的实例")
+            logger.warning(f"未找到媒体服务器 {server} 的实例")
             return {}
 
         def __get_emby_items() -> dict:
@@ -1022,8 +1085,10 @@ class personmetamod(_PluginBase):
 
         service = self.service_infos(server_type).get(server)
         if not service:
-            logger.warn(f"未找到媒体服务器 {server} 的实例")
+            logger.warning(f"未找到媒体服务器 {server} 的实例")
             return {}
+        # 写入后使详情缓存失效
+        self._iteminfo_cache.pop(f"{server}_{itemid}", None)
 
         def __set_emby_iteminfo():
             """
@@ -1104,7 +1169,7 @@ class personmetamod(_PluginBase):
 
         service = self.service_infos(server_type).get(server)
         if not service:
-            logger.warn(f"未找到媒体服务器 {server} 的实例")
+            logger.warning(f"未找到媒体服务器 {server} 的实例")
             return {}
 
         def __download_image():
@@ -1124,7 +1189,7 @@ class personmetamod(_PluginBase):
                     logger.info("图片下载成功")
                     return base64.b64encode(r.content).decode()
                 else:
-                    logger.warn(f"{imageurl} 图片下载失败，请检查网络连通性")
+                    logger.warning(f"{imageurl} 图片下载失败，请检查网络连通性")
             except Exception as err:
                 logger.error(f"下载图片失败：{str(err)}")
             return None

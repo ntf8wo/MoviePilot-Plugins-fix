@@ -1,9 +1,9 @@
 {
   "personmetamod": {
-    "name": "演职人员刮削(mod)",
-    "description": "刮削演职人员图片以及中文名称（优先匹配豆瓣数据）。",
+    "name": "演职人员刮削-Mod",
+    "description": "刮削演职人员详细元数据（姓名/角色仅限TMDB，简介/图片TMDB优先豆瓣兜底）。支持Emby出生/逝世/外部ID等字段。",
     "author": "Mod by ntf8wo",
-    "version": "2.2.3",
+    "version": "1.0",
     "level": 1,
     "labels": "刮削,演职人员"
   }
