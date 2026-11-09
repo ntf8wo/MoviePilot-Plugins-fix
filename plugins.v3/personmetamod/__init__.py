@@ -35,7 +35,7 @@ class personmetamod(_PluginBase):
     # 插件图标
     plugin_icon = "actor.png"
     # 插件版本
-    plugin_version = "1.0"
+    plugin_version = "1.1"
     # 插件作者
     plugin_author = "ntf8wo"
     # 作者主页
@@ -59,6 +59,7 @@ class personmetamod(_PluginBase):
     _type = "all"
     _remove_nozh = False
     _force_image = False
+    _tmdb_apikey = ""
     _mediaservers = []
 
     # 运行期缓存：TMDB人物详情 / 媒体项详情（键：tmdbid、server_itemid）
@@ -79,6 +80,7 @@ class personmetamod(_PluginBase):
             self._delay = config.get("delay") or 0
             self._remove_nozh = config.get("remove_nozh") or False
             self._force_image = config.get("force_image") or False
+            self._tmdb_apikey = config.get("tmdb_apikey") or ""
             self._mediaservers = config.get("mediaservers") or []
 
         # 停止现有任务
@@ -113,6 +115,7 @@ class personmetamod(_PluginBase):
             "delay": self._delay,
             "remove_nozh": self._remove_nozh,
             "force_image": self._force_image,
+            "tmdb_apikey": self._tmdb_apikey,
             "mediaservers": self._mediaservers
         })
 
@@ -254,6 +257,27 @@ class personmetamod(_PluginBase):
                                 },
                                 'content': [
                                     {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'tmdb_apikey',
+                                            'label': 'TMDB API Key（留空使用系统设置）',
+                                            'placeholder': '32位密钥'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12
+                                },
+                                'content': [
+                                    {
                                         'component': 'VSelect',
                                         'props': {
                                             'multiple': True,
@@ -316,6 +340,7 @@ class personmetamod(_PluginBase):
             "delay": 30,
             "remove_nozh": False,
             "force_image": False,
+            "tmdb_apikey": "",
             "mediaservers": []
         }
 
@@ -582,8 +607,10 @@ class personmetamod(_PluginBase):
         """
         获取TMDB人物详细信息，包含external_ids (Imdb, Tvdb)
         """
-        if not settings.TMDB_API_KEY:
-            logger.error("未配置TMDB API KEY")
+        # 插件级 TMDB API Key，留空则使用系统设置
+        apikey = self._tmdb_apikey or settings.TMDB_API_KEY
+        if not apikey:
+            logger.error("未配置TMDB API KEY（插件设置与系统设置均为空）")
             return None
 
         # 运行期内缓存，避免同一个人物在多个条目中被重复请求
@@ -593,7 +620,7 @@ class personmetamod(_PluginBase):
             
         url = f"https://api.themoviedb.org/3/person/{person_id}"
         params = {
-            "api_key": settings.TMDB_API_KEY,
+            "api_key": apikey,
             "language": "zh-CN",
             "append_to_response": "external_ids"
         }
