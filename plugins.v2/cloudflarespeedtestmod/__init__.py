@@ -31,7 +31,7 @@ class cloudflarespeedtestmod(_PluginBase):
     # 插件图标
     plugin_icon = "cloudflare.jpg"
     # 插件版本
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     # 插件作者
     plugin_author = "ntf8wo"
     # 作者主页
@@ -483,6 +483,7 @@ class cloudflarespeedtestmod(_PluginBase):
                     with zipfile.ZipFile(f'{self._cf_path}/{cf_file_name}', 'r') as zip_ref:
                         # 解压ZIP文件中的所有文件到指定目录
                         zip_ref.extractall(self._cf_path)
+                    self.__flatten_extract_dir(self._cf_path, cf_file_name)
                     if Path(f'{self._cf_path}\\{self._binary_name}.exe').exists() or \
                        Path(f'{self._cf_path}\\{self._old_binary_name}.exe').exists():
                         logger.info(f"CloudflareSpeedTest安装成功，当前版本：{release_version}")
@@ -493,6 +494,7 @@ class cloudflarespeedtestmod(_PluginBase):
                         return False, None
                 # 解压
                 os.system(f'{unzip_command}')
+                self.__flatten_extract_dir(self._cf_path, cf_file_name)
                 # 删除压缩包
                 os.system(f'rm -rf {self._cf_path}/{cf_file_name}')
                 if Path(f'{self._cf_path}/{self._binary_name}').exists() or \
@@ -531,6 +533,19 @@ class cloudflarespeedtestmod(_PluginBase):
                 else:
                     os.removedirs(self._cf_path)
                 return False, None
+
+    @staticmethod
+    def __flatten_extract_dir(cf_path, cf_file_name):
+        """
+        新版CloudflareSpeedTest压缩包含同名子目录，解压后将内容上移一层，
+        确保二进制位于 {cf_path}/cfst
+        """
+        inner_name = cf_file_name.replace(".tar.gz", "").replace(".zip", "")
+        inner_dir = Path(f'{cf_path}/{inner_name}')
+        if inner_dir.exists() and inner_dir.is_dir():
+            for f in inner_dir.iterdir():
+                os.replace(f, Path(cf_path) / f.name)
+            inner_dir.rmdir()
 
     def __get_windows_cloudflarest(self, download_url, proxies):
         response = Response()
