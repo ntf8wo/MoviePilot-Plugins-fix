@@ -23,7 +23,7 @@ from app.utils.ip import IpUtils
 from app.utils.system import SystemUtils
 
 
-class CloudflareSpeedTestMod(_PluginBase):
+class cloudflarespeedtestmod(_PluginBase):
     # 插件名称
     plugin_name = "Cloudflare IP优选-Mod"
     # 插件描述
@@ -31,7 +31,7 @@ class CloudflareSpeedTestMod(_PluginBase):
     # 插件图标
     plugin_icon = "cloudflare.jpg"
     # 插件版本
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     # 插件作者
     plugin_author = "ntf8wo"
     # 作者主页
@@ -623,7 +623,7 @@ class CloudflareSpeedTestMod(_PluginBase):
         if self.get_state():
             return [
                 {
-                    "id": "CloudflareSpeedTestMod",
+                    "id": "cloudflarespeedtestmod",
                     "name": "Cloudflare IP优选Mod服务",
                     "trigger": CronTrigger.from_crontab(self._cron),
                     "func": self.__cloudflareSpeedTest,

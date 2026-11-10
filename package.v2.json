@@ -11,7 +11,7 @@
     "name": "Cloudflare IP优选-Mod",
     "description": "测试Cloudflare CDN延迟和速度自动优选IP，支持推送AdGuard Home DNS重写（全家生效）。",
     "author": "Mod by ntf8wo",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "level": 1,
     "labels": "网络,优选"
   }
