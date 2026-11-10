@@ -31,7 +31,7 @@ class CloudflareSpeedTestMod(_PluginBase):
     # 插件图标
     plugin_icon = "cloudflare.jpg"
     # 插件版本
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     # 插件作者
     plugin_author = "ntf8wo"
     # 作者主页
@@ -911,12 +911,11 @@ class CloudflareSpeedTestMod(_PluginBase):
                                 },
                                 'content': [
                                     {
-                                        'component': 'VTextarea',
+                                        'component': 'VTextField',
                                         'props': {
                                             'model': 'agh_domains',
-                                            'rows': 3,
-                                            'label': 'AGH托管域名（每行一个，仅这些域名的重写会被更新）',
-                                            'placeholder': 'pt.example.com\n*.another-pt.com'
+                                            'label': 'AGH托管域名（多个用英文逗号分隔，仅这些会被更新）',
+                                            'placeholder': 'pt.example.com,*.another-pt.com'
                                         }
                                     }
                                 ]

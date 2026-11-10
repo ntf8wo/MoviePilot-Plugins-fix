@@ -18,12 +18,13 @@
     "name": "Cloudflare IP优选-Mod",
     "description": "测试Cloudflare CDN延迟和速度自动优选IP，支持推送AdGuard Home DNS重写（全家生效）。",
     "labels": "网络,优选",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "icon": "cloudflare.jpg",
     "author": "ntf8wo",
     "level": 1,
     "system_version": ">=3.0.0",
     "history": {
+      "v1.0.3": "导入方式回退为与原版一致（app.utils/app.core），适配当前 MP v3 运行时；零pip依赖；托管域名改单行逗号分隔。",
       "v1.0.2": "移除 python_hosts 依赖（原插件死代码），插件零pip依赖，避免NAS访问PyPI失败导致无法加载。",
       "v1.0.1": "修复MP v3导入兼容：app.sdk 路径替换 app.utils/app.core，NotificationType 更名 MessageType。",
       "v1.0": "基于 thsrite CloudflareSpeedTest v1.5.1：优选结果可推送 AdGuard Home DNS重写（仅托管域名列表，其余条目不碰）；CustomHosts 联动改为可选。"
