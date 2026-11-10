@@ -10,7 +10,6 @@ import pytz
 import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from python_hosts import Hosts, HostsEntry
 from requests import Response
 
 from app import schemas
@@ -32,7 +31,7 @@ class CloudflareSpeedTestMod(_PluginBase):
     # 插件图标
     plugin_icon = "cloudflare.jpg"
     # 插件版本
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     # 插件作者
     plugin_author = "ntf8wo"
     # 作者主页
@@ -976,68 +975,6 @@ class CloudflareSpeedTestMod(_PluginBase):
             return schemas.Response(success=False, message="API密钥错误")
         self.__cloudflareSpeedTest()
         return schemas.Response(success=True)
-
-    @staticmethod
-    def __read_system_hosts():
-        """
-        读取系统hosts对象
-        """
-        # 获取本机hosts路径
-        if SystemUtils.is_windows():
-            hosts_path = r"c:\windows\system32\drivers\etc\hosts"
-        else:
-            hosts_path = '/etc/hosts'
-        # 读取系统hosts
-        return Hosts(path=hosts_path)
-
-    def __add_hosts_to_system(self, hosts):
-        """
-        添加hosts到系统
-        """
-        # 系统hosts对象
-        system_hosts = self.__read_system_hosts()
-        # 过滤掉插件添加的hosts
-        orgin_entries = []
-        for entry in system_hosts.entries:
-            if entry.entry_type == "comment" and entry.comment == "# CustomHostsPlugin":
-                break
-            orgin_entries.append(entry)
-        system_hosts.entries = orgin_entries
-        # 新的有效hosts
-        new_entrys = []
-        # 新的错误的hosts
-        err_hosts = []
-        err_flag = False
-        for host in hosts:
-            if not host:
-                continue
-            host_arr = str(host).split()
-            try:
-                host_entry = HostsEntry(entry_type='ipv4' if IpUtils.is_ipv4(str(host_arr[0])) else 'ipv6',
-                                        address=host_arr[0],
-                                        names=host_arr[1:])
-                new_entrys.append(host_entry)
-            except Exception as err:
-                err_hosts.append(host + "\n")
-                logger.error(f"[HOST] 格式转换错误：{str(err)}")
-                # 推送实时消息
-                self.systemmessage.put(f"[HOST] 格式转换错误：{str(err)}", title="Cloudflare IP优选")
-
-        # 写入系统hosts
-        if new_entrys:
-            try:
-                # 添加分隔标识
-                system_hosts.add([HostsEntry(entry_type='comment', comment="# CustomHostsPlugin")])
-                # 添加新的Hosts
-                system_hosts.add(new_entrys)
-                system_hosts.write()
-                logger.info("更新系统hosts文件成功")
-            except Exception as err:
-                err_flag = True
-                logger.error(f"更新系统hosts文件失败：{str(err) or '请检查权限'}")
-                # 推送实时消息
-                self.systemmessage.put(f"更新系统hosts文件失败：{str(err) or '请检查权限'}", title="Cloudflare IP优选")
-        return err_flag, err_hosts
 
     def stop_service(self):
         """
