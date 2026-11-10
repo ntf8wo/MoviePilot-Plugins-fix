@@ -13,5 +13,19 @@
       "v1.1": "新增插件级 TMDB API Key 设置（留空使用系统设置）。",
       "v1.0": "适配 MoviePilot v3（app.sdk 接口与 media_source 识别）；TMDB 为主豆瓣兜底；修复误删风险，优化缓存与豆瓣懒加载。"
     }
+  },
+  "cloudflarespeedtestmod": {
+    "name": "Cloudflare IP优选-Mod",
+    "description": "测试Cloudflare CDN延迟和速度自动优选IP，支持推送AdGuard Home DNS重写（全家生效）。",
+    "labels": "网络,优选",
+    "version": "1.0",
+    "icon": "cloudflare.jpg",
+    "author": "ntf8wo",
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "history": {
+      "v1.0": "基于 thsrite CloudflareSpeedTest v1.5.1：优选结果可推送 AdGuard Home DNS重写（仅托管域名列表，其余条目不碰）；CustomHosts 联动改为可选。"
+    }
   }
 }
+

@@ -15,6 +15,7 @@ https://github.com/ntf8wo/MoviePilot-Plugins-fix
 | 插件 | 说明 | MoviePilot v2 | MoviePilot v3 |
 |---|---|---|---|
 | 演职人员刮削-Mod (`personmetamod`) | 刮削演职人员详细元数据（姓名/角色仅限TMDB，简介/图片TMDB优先豆瓣兜底）。支持Emby出生/逝世/外部ID等字段。 | 1.2 (`plugins.v2`) | 1.2 (`plugins.v3`) |
+| Cloudflare IP优选-Mod (`cloudflarespeedtestmod`) | 测试Cloudflare CDN延迟和速度自动优选IP，支持推送AdGuard Home DNS重写（全家生效）。基于 thsrite 的 CloudflareSpeedTest。 | 1.0 (`plugins.v2`) | 1.0 (`plugins.v3`) |
 
 > MoviePilot v3 用户会自动从 `plugins.v3/` + `package.v3.json` 加载；v2 用户仍从 `plugins.v2/` + `package.v2.json` 加载。
 
