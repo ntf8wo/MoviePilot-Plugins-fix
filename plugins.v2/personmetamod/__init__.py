@@ -37,7 +37,7 @@ class personmetamod(_PluginBase):
     # 插件图标
     plugin_icon = "actor.png"
     # 插件版本
-    plugin_version = "1.1"
+    plugin_version = "1.2"
     # 插件作者
     plugin_author = "ntf8wo"
     # 作者主页
@@ -67,6 +67,8 @@ class personmetamod(_PluginBase):
     # 运行期缓存：TMDB人物详情 / 媒体项详情（键：tmdbid、server_itemid）
     _tmdb_person_cache = {}
     _iteminfo_cache = {}
+    # 运行期记录的可用的TMDB API域名（多域名容错）
+    _tmdb_domain = None
 
     def init_plugin(self, config: dict = None):
 
@@ -599,9 +601,26 @@ class personmetamod(_PluginBase):
 
         return getter
 
+    def __tmdb_api_domains(self) -> List[str]:
+        """
+        生成TMDB API候选域名：上次成功的域名优先，其次MP系统配置，再次官方备用域名
+        """
+        domains = [
+            self._tmdb_domain,
+            getattr(settings, "TMDB_API_DOMAIN", None),
+            "api.themoviedb.org",
+            "api.tmdb.org",
+        ]
+        result = []
+        for domain in domains:
+            if domain and domain not in result:
+                result.append(domain)
+        return result
+
     def __get_tmdb_person_full(self, person_id: int) -> Optional[dict]:
         """
-        获取TMDB人物详细信息，包含external_ids (Imdb, Tvdb)
+        获取TMDB人物详细信息，包含external_ids (Imdb, Tvdb)。
+        多域名容错：连接失败自动切换候选域名，成功的域名在运行期内优先复用
         """
         # 插件级 TMDB API Key，留空则使用系统设置
         apikey = self._tmdb_apikey or settings.TMDB_API_KEY
@@ -614,28 +633,53 @@ class personmetamod(_PluginBase):
         if cache_key in self._tmdb_person_cache:
             return self._tmdb_person_cache[cache_key]
             
-        url = f"https://api.themoviedb.org/3/person/{person_id}"
         params = {
             "api_key": apikey,
             "language": "zh-CN",
             "append_to_response": "external_ids"
         }
         
-        logger.info(f"正在请求TMDB人物详情: ID={person_id}, URL={url}")
-        try:
-            res = RequestUtils(ua=settings.USER_AGENT).get_res(url=url, params=params)
+        # 依次尝试候选域名，连接失败自动切换，成功后本轮记住该域名
+        res = None
+        used_domain = None
+        for domain in self.__tmdb_api_domains():
+            url = f"https://{domain}/3/person/{person_id}"
+            logger.info(f"正在请求TMDB人物详情: ID={person_id}, URL={url}")
+            try:
+                res = RequestUtils(ua=settings.USER_AGENT, timeout=10).get_res(url=url, params=params)
+            except Exception as e:
+                logger.error(f"TMDB人物详情请求异常: {e}")
+                res = None
             if res and res.status_code == 200:
-                data = res.json()
-                logger.info(f"TMDB人物详情请求成功: ID={person_id}")
-                logger.debug(f"TMDB返回数据: {json.dumps(data, ensure_ascii=False)}")
-                self._tmdb_person_cache[cache_key] = data
-                if len(self._tmdb_person_cache) > 2000:
-                    self._tmdb_person_cache.clear()
-                return data
-            else:
-                logger.error(f"TMDB人物详情请求失败: ID={person_id}, Code={res.status_code if res else 'Unknown'}, Msg={res.text if res else ''}")
+                used_domain = domain
+                break
+            if res and res.status_code != 429 and res.status_code < 500:
+                # Key无效等HTTP级错误换域名也不会变，直接失败
+                logger.error(f"TMDB人物详情请求失败: ID={person_id}, Code={res.status_code}, Msg={res.text if res else ''}")
+                return None
+            if self._tmdb_domain == domain:
+                # 上次成功的域名失效了，清掉记忆重新探测
+                self._tmdb_domain = None
+            logger.warning(f"TMDB域名 {domain} 连接失败或被限流，尝试下一个候选域名 ...")
+            res = None
+
+        if not used_domain:
+            logger.error(f"TMDB人物详情请求失败: ID={person_id}, 所有候选域名均不可用")
+            return None
+
+        # 记住本次成功的域名，后续请求直接使用
+        self._tmdb_domain = used_domain
+
+        try:
+            data = res.json()
+            logger.info(f"TMDB人物详情请求成功: ID={person_id}, 域名={used_domain}")
+            logger.debug(f"TMDB返回数据: {json.dumps(data, ensure_ascii=False)}")
+            self._tmdb_person_cache[cache_key] = data
+            if len(self._tmdb_person_cache) > 2000:
+                self._tmdb_person_cache.clear()
+            return data
         except Exception as e:
-            logger.error(f"TMDB人物详情请求异常: {e}")
+            logger.error(f"TMDB人物详情解析失败: {e}")
         return None
 
     def __update_people(self, server: str, server_type: str,
