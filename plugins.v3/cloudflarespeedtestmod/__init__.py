@@ -31,7 +31,7 @@ class cloudflarespeedtestmod(_PluginBase):
     # 插件图标
     plugin_icon = "cloudflare.jpg"
     # 插件版本
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     # 插件作者
     plugin_author = "ntf8wo"
     # 作者主页
@@ -282,30 +282,47 @@ class cloudflarespeedtestmod(_PluginBase):
 
     def __get_mp_sites(self) -> List[dict]:
         """
-        读取MP站点管理的站点列表（兼容v3 SitesHelper / v2 SiteHelper接口）
+        读取MP站点管理的站点列表（兼容v3 SitesHelper / v2 SiteHelper接口，
+        均不可用时直接读取用户库site表兜底）
         :return: [{"name": 站点名, "domain": 域名}, ...]
         """
+        result = []
+        # 1) v3: SitesHelper / v2: SiteHelper
         try:
-            from app.sdk.network import SitesHelper
-            sites = SitesHelper().get_indexers() or []
-        except Exception:
             try:
+                from app.sdk.network import SitesHelper
+                sites = SitesHelper().get_indexers() or []
+            except Exception:
                 from app.helper.sites import SiteHelper
                 sites = SiteHelper().get_sites() or []
+            for site in sites:
+                try:
+                    name = site.get("name")
+                    domain = site.get("domain")
+                    if not domain and site.get("url"):
+                        domain = StringUtils.get_url_domain(site.get("url"))
+                    if name and domain:
+                        result.append({"name": str(name), "domain": str(domain).strip().lower()})
+                except Exception:
+                    continue
+            logger.info(f"通过站点助手读取到 {len(result)} 个站点")
+        except Exception as err:
+            logger.info(f"站点助手读取站点失败：{str(err)}")
+        # 2) 兜底：直接读取用户库site表
+        if not result:
+            try:
+                import sqlite3
+                con = sqlite3.connect("/config/user.db")
+                rows = con.execute(
+                    "select name, domain from site where domain is not null and trim(domain) != ''"
+                ).fetchall()
+                con.close()
+                for r in rows:
+                    if r[0] and r[1]:
+                        result.append({"name": str(r[0]), "domain": str(r[1]).strip().lower()})
+                logger.info(f"通过用户库读取到 {len(result)} 个站点")
             except Exception as err:
                 logger.error(f"读取MP站点列表失败：{str(err)}")
-                return []
-        result = []
-        for site in sites:
-            try:
-                name = site.get("name")
-                domain = site.get("domain")
-                if not domain and site.get("url"):
-                    domain = StringUtils.get_url_domain(site.get("url"))
-                if name and domain:
-                    result.append({"name": str(name), "domain": str(domain).strip().lower()})
-            except Exception:
-                continue
         return result
 
     def __push_to_adguard(self, best_ip: str) -> bool:
