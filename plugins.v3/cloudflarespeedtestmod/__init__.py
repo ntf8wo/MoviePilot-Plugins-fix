@@ -31,7 +31,7 @@ class cloudflarespeedtestmod(_PluginBase):
     # 插件图标
     plugin_icon = "cloudflare.jpg"
     # 插件版本
-    plugin_version = "1.0.5"
+    plugin_version = "1.1.0"
     # 插件作者
     plugin_author = "ntf8wo"
     # 作者主页
@@ -70,6 +70,7 @@ class cloudflarespeedtestmod(_PluginBase):
     _agh_username = None
     _agh_password = None
     _agh_domains = None
+    _agh_sites = []
 
     def init_plugin(self, config: dict = None):
         # 停止现有任务
@@ -92,6 +93,7 @@ class cloudflarespeedtestmod(_PluginBase):
             self._agh_username = config.get("agh_username")
             self._agh_password = config.get("agh_password")
             self._agh_domains = config.get("agh_domains")
+            self._agh_sites = config.get("agh_sites") or []
 
         if (self._ipv4 or self._ipv6) and self._onlyonce:
             try:
@@ -278,6 +280,34 @@ class cloudflarespeedtestmod(_PluginBase):
             self.__update_config()
             self.stop_service()
 
+    def __get_mp_sites(self) -> List[dict]:
+        """
+        读取MP站点管理的站点列表（兼容v3 SitesHelper / v2 SiteHelper接口）
+        :return: [{"name": 站点名, "domain": 域名}, ...]
+        """
+        try:
+            from app.sdk.network import SitesHelper
+            sites = SitesHelper().get_indexers() or []
+        except Exception:
+            try:
+                from app.helper.sites import SiteHelper
+                sites = SiteHelper().get_sites() or []
+            except Exception as err:
+                logger.error(f"读取MP站点列表失败：{str(err)}")
+                return []
+        result = []
+        for site in sites:
+            try:
+                name = site.get("name")
+                domain = site.get("domain")
+                if not domain and site.get("url"):
+                    domain = StringUtils.get_url_domain(site.get("url"))
+                if name and domain:
+                    result.append({"name": str(name), "domain": str(domain).strip().lower()})
+            except Exception:
+                continue
+        return result
+
     def __push_to_adguard(self, best_ip: str) -> bool:
         """
         将托管域名的AdGuard Home DNS重写刷新为本次优选IP。
@@ -290,7 +320,21 @@ class cloudflarespeedtestmod(_PluginBase):
         if not self._agh_username or self._agh_password is None:
             logger.error("[AGH] 推送已启用，但AdGuard Home账号或密码未配置")
             return False
-        domains = [d.strip() for d in str(self._agh_domains or "").replace(',', '\n').split('\n') if d.strip()]
+        # 托管域名 = MP站点管理勾选 + 手动追加，合并去重
+        domains = []
+        for d in (self._agh_sites or []):
+            if d and str(d).strip():
+                domains.append(str(d).strip())
+        for d in str(self._agh_domains or "").replace("，", ",").replace(",", "\n").split("\n"):
+            if d.strip():
+                domains.append(d.strip())
+        seen = set()
+        merged = []
+        for d in domains:
+            if d not in seen:
+                seen.add(d)
+                merged.append(d)
+        domains = merged
         if not domains:
             logger.warning("[AGH] 推送已启用，但托管域名列表为空")
             return False
@@ -594,7 +638,8 @@ class cloudflarespeedtestmod(_PluginBase):
             "agh_url": self._agh_url,
             "agh_username": self._agh_username,
             "agh_password": self._agh_password,
-            "agh_domains": self._agh_domains
+            "agh_domains": self._agh_domains,
+            "agh_sites": self._agh_sites
         })
 
     def get_state(self) -> bool:
@@ -651,6 +696,10 @@ class cloudflarespeedtestmod(_PluginBase):
         """
         拼装插件配置页面，需要返回两块数据：1、页面配置；2、数据结构
         """
+        # 读取MP站点管理列表，供站点托管多选
+        site_items = []
+        for s in self.__get_mp_sites():
+            site_items.append({"title": f"{s['name']}（{s['domain']}）", "value": s["domain"]})
         return [
             {
                 'component': 'VForm',
@@ -926,11 +975,38 @@ class cloudflarespeedtestmod(_PluginBase):
                                 },
                                 'content': [
                                     {
-                                        'component': 'VTextField',
+                                        'component': 'VSelect',
+                                        'props': {
+                                            'model': 'agh_sites',
+                                            'multiple': True,
+                                            'chips': True,
+                                            'clearable': True,
+                                            'label': 'MP站点托管（勾选需优选的站点）',
+                                            'items': site_items,
+                                            'no-data-text': '未读取到站点，请先在站点管理中维护'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextarea',
                                         'props': {
                                             'model': 'agh_domains',
-                                            'label': 'AGH托管域名（多个用英文逗号分隔，仅这些会被更新）',
-                                            'placeholder': 'pt.example.com,*.another-pt.com'
+                                            'rows': 5,
+                                            'label': '手动追加域名（每行一个）',
+                                            'placeholder': 'example.com\n*.another.org'
                                         }
                                     }
                                 ]
@@ -975,7 +1051,8 @@ class cloudflarespeedtestmod(_PluginBase):
             "agh_url": "",
             "agh_username": "",
             "agh_password": "",
-            "agh_domains": ""
+            "agh_domains": "",
+            "agh_sites": []
         }
 
     def get_page(self) -> List[dict]:
