@@ -1,4 +1,6 @@
 import os
+import socket
+import ssl
 import subprocess
 import time
 import zipfile
@@ -25,13 +27,13 @@ from app.utils.system import SystemUtils
 
 class cloudflarespeedtestmod(_PluginBase):
     # 插件名称
-    plugin_name = "Cloudflare IP优选-Mod"
+    plugin_name = "CF/GitHub IP优选-Mod"
     # 插件描述
-    plugin_desc = "🌩 测试 Cloudflare CDN 延迟和速度自动优选IP，支持推送 AdGuard Home DNS重写（全家生效）。"
+    plugin_desc = "🌩 测试Cloudflare CDN延迟和速度自动优选IP推送AdGuard Home；附GitHub直连优选（git推拉/release下载加速）。"
     # 插件图标
     plugin_icon = "cloudflare.jpg"
     # 插件版本
-    plugin_version = "1.1.1"
+    plugin_version = "1.2.0"
     # 插件作者
     plugin_author = "ntf8wo"
     # 作者主页
@@ -72,6 +74,16 @@ class cloudflarespeedtestmod(_PluginBase):
     _agh_domains = None
     _agh_sites = []
 
+    # GitHub直连优选
+    _gh_enabled = False
+    _gh_cron = None
+    _gh_domains = ["github.com", "objects.githubusercontent.com"]
+    _gh_static = {
+        "github.com": ["140.82.112.3", "140.82.113.3", "140.82.114.3", "140.82.115.3", "140.82.116.3",
+                       "140.82.121.3", "140.82.121.4", "20.205.243.166", "20.27.177.113", "20.200.245.247"],
+        "objects.githubusercontent.com": ["185.199.108.133", "185.199.109.133", "185.199.110.133", "185.199.111.133"],
+    }
+
     def init_plugin(self, config: dict = None):
         # 停止现有任务
         self.stop_service()
@@ -94,6 +106,8 @@ class cloudflarespeedtestmod(_PluginBase):
             self._agh_password = config.get("agh_password")
             self._agh_domains = config.get("agh_domains")
             self._agh_sites = config.get("agh_sites") or []
+            self._gh_enabled = config.get("gh_enabled") or False
+            self._gh_cron = config.get("gh_cron")
 
         if (self._ipv4 or self._ipv6) and self._onlyonce:
             try:
@@ -325,6 +339,138 @@ class cloudflarespeedtestmod(_PluginBase):
                 logger.error(f"读取MP站点列表失败：{str(err)}")
         return result
 
+    def __agh_set_rewrite(self, domain: str, ip: str) -> bool:
+        """
+        在AdGuard Home中将 domain 的重写设置为 ip（存在则更新，缺失则新增）
+        """
+        base = (self._agh_url or "").rstrip('/')
+        auth = (self._agh_username, self._agh_password)
+        try:
+            res = requests.get(f"{base}/control/rewrite/list", auth=auth, timeout=10)
+            if res.status_code != 200:
+                logger.error(f"[AGH] 获取重写列表失败：HTTP {res.status_code}")
+                return False
+            entries = res.json() or []
+        except Exception as err:
+            logger.error(f"[AGH] 连接AdGuard Home失败：{str(err)}")
+            return False
+        matched = [e for e in entries if isinstance(e, dict) and e.get("domain") == domain]
+        if matched:
+            target = {"domain": matched[0].get("domain"), "answer": matched[0].get("answer")}
+            if target.get("answer") == ip:
+                logger.info(f"[AGH] {domain} 已是目标IP，跳过")
+                return True
+            res = requests.put(f"{base}/control/rewrite/update", auth=auth,
+                               json={"target": target, "update": {"domain": domain, "answer": ip}}, timeout=10)
+            if res.status_code == 200:
+                logger.info(f"[AGH] {domain} 重写已更新：{target.get('answer')} -> {ip}")
+                return True
+            logger.error(f"[AGH] {domain} 重写更新失败：HTTP {res.status_code} {res.text[:100]}")
+            return False
+        res = requests.post(f"{base}/control/rewrite/add", auth=auth,
+                            json={"domain": domain, "answer": ip}, timeout=10)
+        if res.status_code == 200:
+            logger.info(f"[AGH] {domain} 重写已新增 -> {ip}")
+            return True
+        logger.error(f"[AGH] {domain} 重写新增失败：HTTP {res.status_code} {res.text[:100]}")
+        return False
+
+    def __tls_test_ip(self, domain: str, ip: str) -> Tuple[bool, float]:
+        """
+        对候选IP做TLS握手实测（SNI=域名），返回 (是否可用, 连接+握手耗时秒)
+        """
+        try:
+            start = time.monotonic()
+            sock = socket.create_connection((ip, 443), timeout=3)
+            ctx = ssl.create_default_context()
+            ssock = ctx.wrap_socket(sock, server_hostname=domain)
+            ssock.send(f"GET / HTTP/1.1\r\nHost: {domain}\r\nUser-Agent: {settings.USER_AGENT}\r\nConnection: close\r\n\r\n".encode())
+            data = ssock.recv(64)
+            elapsed = time.monotonic() - start
+            ssock.close()
+            if data.startswith(b"HTTP/"):
+                return True, elapsed
+        except Exception:
+            pass
+        return False, 99.0
+
+    def __gh_candidates(self, domain: str) -> set:
+        """
+        汇总GitHub域名的候选IP：静态知名IP池 + 多公共DoH解析结果
+        """
+        candidates = set(self._gh_static.get(domain, []))
+        for tpl in ["https://dns.alidns.com/resolve?name={d}&type=A",
+                    "https://doh.pub/dns-query?name={d}&type=A",
+                    "https://1.1.1.1/dns-query?name={d}&type=A"]:
+            try:
+                res = requests.get(tpl.format(d=domain), timeout=6,
+                                   headers={"accept": "application/dns-json"})
+                if res.status_code == 200:
+                    for a in res.json().get("Answer", []):
+                        if a.get("type") == 1:
+                            candidates.add(a["data"])
+            except Exception:
+                continue
+        return candidates
+
+    def __github_ip_opt(self):
+        """
+        GitHub直连优选：多DNS取候选IP -> TLS实测 -> 最优写入AdGuard Home重写
+        """
+        if not self._agh_enabled:
+            logger.warning("[GitHub优选] 未启用AdGuard Home推送，无处生效，跳过")
+            return
+        base = (self._agh_url or "").rstrip('/')
+        auth = (self._agh_username, self._agh_password)
+        logger.info("GitHub 直连优选开始")
+        try:
+            res = requests.get(f"{base}/control/rewrite/list", auth=auth, timeout=10)
+            if res.status_code != 200:
+                logger.error(f"[GitHub优选] 获取重写列表失败：HTTP {res.status_code}")
+                return
+            rewrites = res.json() or []
+        except Exception as err:
+            logger.error(f"[GitHub优选] 连接AdGuard Home失败：{str(err)}")
+            return
+        changed = []
+        for domain in self._gh_domains:
+            candidates = self.__gh_candidates(domain)
+            current_entry = next((e for e in rewrites if isinstance(e, dict) and e.get("domain") == domain), None)
+            current_ip = current_entry.get("answer") if current_entry else None
+            if current_ip:
+                candidates.add(current_ip)
+            logger.info(f"[GitHub优选] {domain} 候选 {len(candidates)} 个，开始实测 ...")
+            best_ip, best_tls = None, 99.0
+            current_ok, current_tls = False, 99.0
+            for ip in sorted(candidates):
+                ok, tls = self.__tls_test_ip(domain, ip)
+                logger.info(f"[GitHub优选]   {'OK ' if ok else 'DEAD'} {domain} @{ip} tls={tls:.3f}s")
+                if ok:
+                    if ip == current_ip:
+                        current_ok, current_tls = True, tls
+                    if tls < best_tls:
+                        best_ip, best_tls = ip, tls
+            if not best_ip:
+                logger.warning(f"[GitHub优选] {domain} 无可用IP，跳过")
+                continue
+            if current_ip == best_ip:
+                logger.info(f"[GitHub优选] {domain} 当前IP已是可选最优（{best_ip} {best_tls:.3f}s），不调整")
+                continue
+            if current_ip and current_ok and current_tls <= best_tls * 1.3:
+                logger.info(f"[GitHub优选] {domain} 当前IP {current_ip}（{current_tls:.3f}s）仍够用，保持不切换")
+                continue
+            if self.__agh_set_rewrite(domain, best_ip):
+                changed.append(f"{domain} -> {best_ip}")
+            else:
+                changed.append(f"{domain} 更新失败")
+        if self._notify:
+            self.post_message(
+                mtype=NotificationType.SiteMessage,
+                title="【GitHub直连优选任务完成】",
+                text="；".join(changed) if changed else "各域名保持原状"
+            )
+        logger.info("GitHub 直连优选结束")
+
     def __push_to_adguard(self, best_ip: str) -> bool:
         """
         将托管域名的AdGuard Home DNS重写刷新为本次优选IP。
@@ -369,35 +515,10 @@ class cloudflarespeedtestmod(_PluginBase):
 
         ok, fail = 0, 0
         for domain in domains:
-            try:
-                matched = [e for e in entries if isinstance(e, dict) and e.get("domain") == domain]
-                if matched:
-                    target = {"domain": matched[0].get("domain"), "answer": matched[0].get("answer")}
-                    if target.get("answer") == best_ip:
-                        ok += 1
-                        logger.info(f"[AGH] {domain} 已是优选IP，跳过")
-                        continue
-                    res = requests.put(f"{base}/control/rewrite/update", auth=auth,
-                                       json={"target": target, "update": {"domain": domain, "answer": best_ip}},
-                                       timeout=10)
-                    if res.status_code == 200:
-                        ok += 1
-                        logger.info(f"[AGH] {domain} 重写已更新：{target.get('answer')} -> {best_ip}")
-                    else:
-                        fail += 1
-                        logger.error(f"[AGH] {domain} 重写更新失败：HTTP {res.status_code} {res.text[:100]}")
-                else:
-                    res = requests.post(f"{base}/control/rewrite/add", auth=auth,
-                                        json={"domain": domain, "answer": best_ip}, timeout=10)
-                    if res.status_code == 200:
-                        ok += 1
-                        logger.info(f"[AGH] {domain} 重写已新增 -> {best_ip}")
-                    else:
-                        fail += 1
-                        logger.error(f"[AGH] {domain} 重写新增失败：HTTP {res.status_code} {res.text[:100]}")
-            except Exception as err:
+            if self.__agh_set_rewrite(domain, best_ip):
+                ok += 1
+            else:
                 fail += 1
-                logger.error(f"[AGH] {domain} 推送异常：{str(err)}")
 
         logger.info(f"[AGH] 推送完成：成功 {ok}，失败 {fail}")
         return fail == 0
@@ -656,7 +777,9 @@ class cloudflarespeedtestmod(_PluginBase):
             "agh_username": self._agh_username,
             "agh_password": self._agh_password,
             "agh_domains": self._agh_domains,
-            "agh_sites": self._agh_sites
+            "agh_sites": self._agh_sites,
+            "gh_enabled": self._gh_enabled,
+            "gh_cron": self._gh_cron
         })
 
     def get_state(self) -> bool:
@@ -689,16 +812,10 @@ class cloudflarespeedtestmod(_PluginBase):
     def get_service(self) -> List[Dict[str, Any]]:
         """
         注册插件公共服务
-        [{
-            "id": "服务ID",
-            "name": "服务名称",
-            "trigger": "触发器：cron/interval/date/CronTrigger.from_crontab()",
-            "func": self.xxx,
-            "kwargs": {} # 定时器参数
-        }]
         """
+        services = []
         if self.get_state():
-            return [
+            services.append(
                 {
                     "id": "cloudflarespeedtestmod",
                     "name": "Cloudflare IP优选Mod服务",
@@ -706,8 +823,18 @@ class cloudflarespeedtestmod(_PluginBase):
                     "func": self.__cloudflareSpeedTest,
                     "kwargs": {}
                 }
-            ]
-        return []
+            )
+        if self._gh_enabled and self._gh_cron:
+            services.append(
+                {
+                    "id": "cloudflaregithubopt",
+                    "name": "GitHub直连优选服务",
+                    "trigger": CronTrigger.from_crontab(self._gh_cron),
+                    "func": self.__github_ip_opt,
+                    "kwargs": {}
+                }
+            )
+        return services
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """
@@ -890,15 +1017,53 @@ class cloudflarespeedtestmod(_PluginBase):
                             {
                                 'component': 'VCol',
                                 'props': {
+                                    'cols': 12,
+                                    'md': 4
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'gh_enabled',
+                                            'label': 'GitHub直连优选',
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 8
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VCronField',
+                                        'props': {
+                                            'model': 'gh_cron',
+                                            'label': 'GitHub优选周期',
+                                            'placeholder': '0 */2 * * *'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
                                     'cols': 12
                                 },
                                 'content': [
                                     {
-                                        'component': 'VTextField',
+                                        'component': 'VAlert',
                                         'props': {
-                                            'model': 'additional_args',
-                                            'label': '高级参数',
-                                            'placeholder': '-dd'
+                                            'type': 'info',
+                                            'variant': 'tonal',
+                                            'text': 'GitHub优选覆盖 github.com（git推拉）与 objects.githubusercontent.com（release下载），将自动写入AdGuard Home重写。'
                                         }
                                     }
                                 ]
@@ -1069,7 +1234,9 @@ class cloudflarespeedtestmod(_PluginBase):
             "agh_username": "",
             "agh_password": "",
             "agh_domains": "",
-            "agh_sites": []
+            "agh_sites": [],
+            "gh_enabled": False,
+            "gh_cron": ""
         }
 
     def get_page(self) -> List[dict]:

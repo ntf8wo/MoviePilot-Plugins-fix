@@ -15,16 +15,17 @@
     }
   },
   "cloudflarespeedtestmod": {
-    "name": "Cloudflare IP优选-Mod",
-    "description": "测试Cloudflare CDN延迟和速度自动优选IP，支持推送AdGuard Home DNS重写（全家生效）。",
+    "name": "CF/GitHub IP优选-Mod",
+    "description": "测试Cloudflare CDN延迟和速度自动优选IP推送AdGuard Home；附GitHub直连优选（git推拉/release下载加速）。",
     "labels": "网络,优选",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "icon": "cloudflare.jpg",
     "author": "ntf8wo",
     "level": 1,
     "system_version": ">=3.0.0",
     "history": {
-      "v1.1.0": "联动MP站点管理：下拉多选需优选的站点，无需手输域名；手动追加域名改为多行输入框。",
+      "v1.2.0": "新增GitHub直连优选（github.com+release下载，纯Python TLS实测多DNS候选），独立周期调度并写入AGH重写；AGH推送逻辑重构复用。",
+      "v1.1.1": "站点读取增加用户库site表兜底。",
       "v1.0.5": "兼容新版CloudflareSpeedTest压缩包子目录结构（解压后自动上移一层），首次AGH全链路验证通过（13/13域名推送成功）。",
       "v1.0.4": "修复类名与插件ID不一致导致 MP v3 运行时无法注册（配置页404）：类名改为与ID完全一致。",
       "v1.0.3": "导入方式回退为与原版一致（app.utils/app.core），适配当前 MP v3 运行时；零pip依赖；托管域名改单行逗号分隔。",
